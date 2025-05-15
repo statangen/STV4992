@@ -1,0 +1,1775 @@
+---
+title: 'Dokumentasjon: Agendastørrelse (H1)'
+author: "T. Tangen"
+date: "2025-04-09"
+output: pdf_document
+warning: false
+messages: false
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(haven)
+library(ggplot2)
+library(tinytable)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(zoo)
+library(PxWebApiData)
+library(jsonlite)
+library(httr)
+library(sf)
+library(MASS)
+library(sandwich)
+library(stargazer)
+library(moments)
+library(DescTools)
+library(e1071)
+library(lmom)
+library(ineq)
+library(scales)
+library(entropy)
+library(tidyr)
+options(scipen=999)
+```
+
+```{r, oppsett}
+b <- read_excel("b.xlsx", 1)
+
+kpi <- read_excel("inflasjon.xlsx", 1)
+
+kpi <- kpi %>%
+  dplyr::select(1:2)
+
+b <- b %>%
+  left_join(kpi, by = "år") %>%
+  mutate(gb_kpi = gb * (100 / kpi_2015)) %>%
+  mutate(bb_kpi = bb * (100 / kpi_2015))
+
+b <- b %>% dplyr::select(!kpi_2015)
+
+b <- b %>% filter(!(bb == 0 & gb == 0))
+
+h1a_u <- b %>% filter(kap < 3000)
+
+h1a_i <- b %>% filter(kap >= 3000)
+
+valgår <- data.frame(
+  år = 1999:2023,
+  valgperiode = c(rep("1997-2001", 2), 
+                  rep("2001-2005", 4),
+                  rep("2005-2009", 4),
+                  rep("2009-2013", 4),
+                  rep("2013-2017", 4),
+                  rep("2017-2021", 4),
+                  rep("2021-2025", 3)
+                  ))
+
+katlist <- b %>%
+  reframe(hovedkat = unique(hovedkat),
+            hovedkat_t = unique(hovedkat_t)) %>%
+  arrange(hovedkat)
+```
+
+Hypotese 1 lyder: Agendastørrelsen til statsbudsjettet vokser over tid.
+
+Dette innebærer:
+
+a.  Antallet bevilgningskategorier i statsbudsjettet øker over tid.
+
+b.  Antallet sider i regjeringens forslag til statsbudsjett øker over tid.
+
+Oppbygningen av dokumentet er slik at jeg vil teste de to delhypotesene hver for seg. Under delhypotese H1a vil jeg teste utgifter og inntekter hver for seg og ulike bevilgningskategorier hver for seg. Under delhypotese H1b vil jeg teste ulike tidsserier hver for seg.
+
+# 1 Antall bevilgningskategorier (H1a)
+
+## 1.1 Utgifter
+
+I 1.1 tester jeg hypotese H1a i tre bevilgningskategorier for utgifter.
+
+```{r, h1a_utgifter_sumstats}
+h1a_ukappost <- h1a_u %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(post_id)))
+
+h1a_ukappost <- h1a_ukappost %>%
+  left_join(valgår, by = "år")
+
+h1a_ukappost <- h1a_ukappost %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+h1a_ukap <- h1a_u %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(kap)))
+
+h1a_ukap <- h1a_ukap %>%
+  left_join(valgår, by = "år")
+
+h1a_ukap <- h1a_ukap %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+h1a_uposttype <- h1a_u %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(post)))
+
+h1a_uposttype <- h1a_uposttype %>%
+  left_join(valgår, by = "år")
+
+h1a_uposttype <- h1a_uposttype %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+summary(h1a_ukappost)
+summary(h1a_ukap)
+summary(h1a_uposttype)
+```
+
+### 1.1.1 Antall poster for hvert kapittel
+
+Jeg henter ut antall poster for hvert kapittel for hvert år:
+
+```{r, h1a_ukappost_tidsserie}
+plot_h1a_ukappost <- ggplot(h1a_ukappost, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE, 
+             color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1a_ukappost$Antall, na.rm = TRUE), 
+             color = "blue", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ukappost
+```
+
+Jeg tar regresjonen av antall poster for hvert kapittel over år (den røde linjen):
+
+```{r, h1a_ukappost_regresjon}
+mod_h1a_ukappost <- lm(Antall ~ år, data = h1a_ukappost)
+
+summary(mod_h1a_ukappost)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_ukappost_endringer}
+plot_h1a_ukappost_diff <- ggplot(h1a_ukappost, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1a_ukappost$endring, na.rm = TRUE),
+             color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Prosentvis endring i antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ukappost_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1a_ukappost_ttest}
+ttest_h1a_ukappost <- t.test(h1a_ukappost$endring, alternative = "greater", mu = 0)
+
+cat("P-verdi:", ttest_h1a_ukappost$p.value, 
+    ifelse(test = ttest_h1a_ukappost$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+### 1.1.2 Antall kapitler
+
+Jeg henter ut antall kapitler for hvert år:
+
+```{r, h1a_ukap_tidsserie}
+h1a_ukap <- h1a_u %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(kap)))
+
+h1a_ukap <- h1a_ukap %>%
+  left_join(valgår, by = "år")
+
+plot_h1a_ukap <- ggplot(h1a_ukap, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1a_ukap$Antall),
+             color = "blue", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Antall kapitler") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ukap
+```
+
+Jeg tar regresjonen av antall kapitler over år (den røde linjen):
+
+```{r, h1a_ukap_regresjon}
+mod_h1a_ukap <- lm(Antall ~ år, data = h1a_ukap)
+
+summary(mod_h1a_ukap)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_ukap_endringer}
+h1a_ukap <- h1a_ukap %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+plot_h1a_ukap_diff <- ggplot(h1a_ukap, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1a_ukap$endring, na.rm = TRUE),
+             color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Prosentvis endring i antall kapitler") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ukap_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null omvendt veg:
+
+```{r, h1a_ukap_ttest}
+ttest_h1a_ukap <- t.test(h1a_ukap$endring, alternative = "less", mu = 0)
+
+cat("P-verdi:", ttest_h1a_ukap$p.value, 
+    ifelse(test = ttest_h1a_ukap$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Jeg tester også om gjennomsnittet av endringene etter 2015 er signifikant forskjellig fra 0:
+
+```{r, h1a_ukap_ttest2015}
+ttest_h1a_ukap_2015 <- h1a_ukap %>%
+  filter(!år < 2015)
+
+h1a_test_2015 <- t.test(ttest_h1a_ukap_2015$endring, alternative = "less", mu = 0)
+
+cat("P-verdi:", h1a_test_2015$p.value, 
+    ifelse(test = h1a_test_2015$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+### 1.1.3 Antall posttyper
+
+Jeg henter ut antall posttyper for hvert år:
+
+```{r, h1a_uposttype_tidsserie}
+h1a_uposttype <- h1a_u %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(post)))
+
+h1a_uposttype <- h1a_uposttype %>%
+  left_join(valgår, by = "år")
+
+plot_h1a_uposttype <- ggplot(h1a_uposttype, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1a_uposttype$Antall),
+             color = "blue", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Antall posttyper") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_uposttype
+```
+
+Jeg tar regresjonen av antall posttyper over år (den røde linjen):
+
+```{r, h1a_uposttype_regresjon}
+mod_h1a_uposttype <- lm(Antall ~ år, data = h1a_uposttype)
+
+summary(mod_h1a_uposttype)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_uposttype_endringer}
+h1a_uposttype <- h1a_uposttype %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+plot_h1a_uposttype_diff <- ggplot(h1a_uposttype, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1a_uposttype$endring, na.rm = TRUE),
+             color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Prosentvis endring i antall posttyper") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_uposttype_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1a_uposttype_ttest}
+ttest_h1a_uposttype <- t.test(h1a_uposttype$endring, alternative = "greater", mu = 0)
+
+cat("P-verdi:", ttest_h1a_uposttype$p.value, 
+    ifelse(test = ttest_h1a_uposttype$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+## 1.2 Inntektsanalyse
+
+I 1.2 tester jeg hypotese H1a i tre bevilgningskategorier for inntekter.
+
+```{r, h1a_inntekter_sumstats}
+h1a_ikappost <- h1a_i %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(post_id)))
+
+h1a_ikappost <- h1a_ikappost %>%
+  left_join(valgår, by = "år")
+
+h1a_ikappost <- h1a_ikappost %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+h1a_ikap <- h1a_i %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(kap)))
+
+h1a_ikap <- h1a_ikap %>%
+left_join(valgår, by = "år")
+
+h1a_ikap <- h1a_ikap %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+h1a_iposttype <- h1a_i %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(post)))
+
+h1a_iposttype <- h1a_iposttype %>%
+  left_join(valgår, by = "år")
+
+h1a_iposttype <- h1a_iposttype %>%
+  mutate(endring = (Antall / lag(Antall) - 1) * 100)
+
+summary(h1a_ikappost)
+summary(h1a_ikap)
+summary(h1a_iposttype)
+```
+
+### 1.2.1 Antall poster for hvert kapittel
+
+Jeg henter ut antall poster for hvert kapittel for hvert år:
+
+```{r, h1a_ikappost_tidsserie}
+plot_h1a_ikappost <- ggplot(h1a_ikappost, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1a_ikappost$Antall, na.rm = TRUE),
+           color = "blue", linetype = "dashed") +
+  labs(title = "Inntekter", x = "År",
+       y = "Antall poster per kapittel") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, "cm"),
+        legend.position = "right",
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+        ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ikappost
+```
+
+Jeg tar regresjonen av antall poster for hvert kapittel over år (den røde linjen):
+
+```{r, h1a_ikappost_regresjon}
+mod_h1a_ikappost <- lm(Antall ~ år, data = h1a_ikappost)
+
+summary(mod_h1a_ikappost)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_ikappost_endringer}
+plot_h1a_ikappost_diff <- ggplot(h1a_ikappost, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1a_ikappost$endring, na.rm = TRUE),
+           color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  labs(title = "Inntekter", x = "År",
+            y = "Prosentvis endring i antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ikappost_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null omvendt veg:
+
+```{r, h1a_ikappost_ttest}
+ttest_h1a_ikappost <- t.test(h1a_ikappost$endring, alternative = "less", mu = 0)
+
+cat("P-verdi:", ttest_h1a_ikappost$p.value, 
+  ifelse(test = ttest_h1a_ikappost$p.value < 0.05, 
+         "- endringen er signifikant",
+         "- endringen er ikke signifikant"))
+```
+
+### 1.2.2 Antall kapitler
+
+Jeg henter ut antall kapitler for hvert år:
+
+```{r, h1a_ikap_tidsserie}
+plot_h1a_ikap <- ggplot(h1a_ikap, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1a_ikap$Antall),
+             color = "blue", linetype = "dashed") +
+  labs(title = "Inntekter", x = "År",
+       y = "Antall kapitler") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+    ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ikap
+```
+
+Jeg tar regresjonen av antall kapitler over år (den røde linjen):
+
+```{r, h1a_ikap_regresjon}
+mod_h1a_ikap <- lm(Antall ~ år, data = h1a_ikap)
+
+summary(mod_h1a_ikap)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_ikap_endringer}
+plot_h1a_ikap_diff <- ggplot(h1a_ikap, aes(x = år, y = endring)) +
+geom_line() + 
+geom_hline(yintercept = mean(h1a_ikap$endring, na.rm = TRUE),
+           color = "blue", linetype = "dashed") +
+geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+labs(title = "Inntekter", x = "År",
+     y = "Prosentvis endring i antall kapitler") +
+theme_minimal() +
+theme(
+  plot.title = element_text(hjust = 0.5),
+  legend.text = element_text(size = 8),
+  legend.key.size = unit(0.4, "cm"),
+  legend.position = "right",
+  panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  panel.grid.minor = element_blank(),
+  axis.text.y = element_text(size = 8), 
+  axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+) +
+scale_x_continuous(breaks = seq(2000,2023, 1)) +
+scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_ikap_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null omvendt veg:
+
+```{r, h1a_ikap_ttest}
+ttest_h1a_ikap <- t.test(h1a_ikap$endring, alternative = "less", mu = 0)
+
+cat("P-verdi:", ttest_h1a_ikap$p.value, 
+  ifelse(test = ttest_h1a_ikap$p.value < 0.05, 
+         "- endringen er signifikant",
+         "- endringen er ikke signifikant"))
+```
+
+### 1.2.3 Antall posttyper
+
+Jeg henter ut antall posttyper for hvert år:
+
+```{r, h1a_iposttype_tidsserie}
+plot_h1a_iposttype <- ggplot(h1a_iposttype, aes(x = år, y = Antall)) +
+geom_line() + 
+geom_smooth(method = "lm", se = FALSE,
+            color = "red", linetype = "dashed") +
+geom_hline(yintercept = mean(h1a_iposttype$Antall),
+           color = "blue", linetype = "dashed") +
+labs(title = "Inntekter", x = "År",
+     y = "Antall posttyper") +
+theme_minimal() +
+theme(
+  plot.title = element_text(hjust = 0.5),
+  legend.text = element_text(size = 8),
+  legend.key.size = unit(0.4, "cm"),
+  legend.position = "right",
+  panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  panel.grid.minor = element_blank(),
+  axis.text.y = element_text(size = 8), 
+  axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+) +
+scale_x_continuous(breaks = seq(1999,2023, 1)) +
+scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_iposttype
+```
+
+Jeg tar regresjonen av antall posttyper over år (den røde linjen):
+
+```{r, h1a_iposttype_regresjon}
+mod_h1a_iposttype <- lm(Antall ~ år, data = h1a_iposttype)
+
+summary(mod_h1a_iposttype)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_iposttype_endringer}
+plot_h1a_iposttype_diff <- ggplot(h1a_iposttype, aes(x = år, y = endring)) +
+geom_line() + 
+geom_hline(yintercept = mean(h1a_iposttype$endring, na.rm = TRUE),
+           color = "blue", linetype = "dashed") +
+geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+labs(title = "Inntekter", x = "År",
+     y = "Prosentvis endring i antall posttyper") +
+theme_minimal() +
+theme(
+  plot.title = element_text(hjust = 0.5),
+  legend.text = element_text(size = 8),
+  legend.key.size = unit(0.4, "cm"),
+  legend.position = "right",
+  panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  panel.grid.minor = element_blank(),
+  axis.text.y = element_text(size = 8), 
+  axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+) +
+scale_x_continuous(breaks = seq(2000,2023, 1)) +
+scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1a_iposttype_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null omvendt veg:
+
+```{r, h1a_iposttype_ttest}
+ttest_h1a_iposttype <- t.test(h1a_iposttype$endring, alternative = "less", mu = 0)
+
+cat("P-verdi:", ttest_h1a_iposttype$p.value, 
+  ifelse(test = ttest_h1a_iposttype$p.value < 0.05, 
+         "- endringen er signifikant",
+         "- endringen er ikke signifikant"))
+```
+
+# 2 Antall sider (H1b)
+
+I 2 tester jeg hypotese H1b. Jeg laster inn sidedata for perioden 1945-2024:
+
+```{r, h1b_s1945}
+h1b_s1945 <- read_excel("sider.xlsx", 1)
+
+h1b_s1945 <- h1b_s1945 %>%
+  mutate(endring = (antall / lag(antall) - 1) * 100)
+
+h1b_s1961 <- h1b_s1945 %>%
+  filter(!år < 1961)
+
+h1b_s1961 <- h1b_s1961 %>%
+  mutate(endring = (antall / lag(antall) - 1) * 100)
+
+h1b_s1999 <- h1b_s1945 %>%
+  filter(!år < 1999)
+
+h1b_s1999 <- h1b_s1999 %>%
+  mutate(endring = (antall / lag(antall) - 1) * 100)
+
+summary(h1b_s1945)
+summary(h1b_s1961)
+summary(h1b_s1999)
+```
+
+## 2.1 Antall sider 1945-2024
+
+Plott av tidsserien til antallet sider for 1945-2024:
+
+```{r, h1b_s1945_tidsserie}
+plot_h1b_s1945 <- ggplot(h1b_s1945, aes(x = år, y = antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1b_s1945$antall, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  labs(x = "År",
+       y = "Antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(1945,2024), breaks = seq(1945,2024, 4))
+
+plot_h1b_s1945
+```
+
+Jeg tar regresjonen av antall sider over år (den røde linjen):
+
+```{r, h1b_s1945_regresjon}
+mod_h1b_s1945 <- lm(antall ~ år, data = h1b_s1945)
+
+summary(mod_h1b_s1945)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1b_s1945_endringer}
+plot_h1b_s1945_diff <- ggplot(h1b_s1945, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1b_s1945$endring, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  geom_hline(yintercept = 0, 
+             color = "black", linetype =  "dashed") +
+
+  labs(x = "År",
+       y = "Prosentvis endring i antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(1946,2024), breaks = seq(1946,2024, 4)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1b_s1945_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1b_s1945_ttest}
+ttest_h1b_s1945 <- t.test(h1b_s1945$endring, alternative = "greater", mu = 0)
+
+cat("P-verdi:", ttest_h1b_s1945$p.value, 
+    ifelse(test = ttest_h1b_s1945$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+## 2.2 Antall sider 1961-2024
+
+Plott av tidsserien til antallet sider for 1961-2024:
+
+```{r, h1b_s1961_tidsserie}
+plot_h1b_s1961 <- ggplot(h1b_s1961, aes(x = år, y = antall)) +
+  geom_line() + 
+  geom_smooth(method = "glm", formula = y ~ poly(x, 3), se = TRUE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1b_s1961$antall, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  labs(x = "År",
+       y = "Antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(1961,2024), breaks = seq(1961,2024, 4)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1b_s1961
+```
+
+Jeg tar regresjonen av antall sider over år (den røde linjen):
+
+```{r, h1b_s1961_regresjon}
+mod1_h1b_s1961 <- lm(antall ~ år, data = h1b_s1961)
+mod1_h1b_s1961 <- glm(antall ~ poly(år, 3), data = h1b_s1961)
+
+
+summary(mod_h1b_s1961)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1b_s1961_endringer}
+plot_h1b_s1961_diff <- ggplot(h1b_s1961, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1b_s1961$endring, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  geom_hline(yintercept = 0, 
+             color = "black", linetype =  "dashed") +
+
+  labs(x = "År",
+       y = "Prosentvis endring i antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(1962,2024), breaks = seq(1962,2024, 4)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1b_s1961_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1b_s1961_ttest}
+ttest_h1b_s1961 <- t.test(h1b_s1961$endring, alternative = "greater", mu = 0)
+
+cat("P-verdi:", ttest_h1b_s1961$p.value, 
+    ifelse(test = ttest_h1b_s1961$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+## 2.3 Antall sider 1999-2024
+
+Plott av tidsserien til antallet sider for 1999-2024:
+
+```{r, h1b_s1999_tidsserie}
+plot_h1b_s1999 <- ggplot(h1b_s1999, aes(x = år, y = antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE, 
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h1b_s1999$antall, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  labs(x = "År",
+       y = "Antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(1999,2024), breaks = seq(1999,2024, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1b_s1999
+```
+
+Jeg tar regresjonen av antall sider over år (den røde linjen):
+
+```{r, h1b_s1999_regresjon}
+mod_h1b_s1999 <- lm(antall ~ år, data = h1b_s1999)
+
+summary(mod_h1b_s1999)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1b_s1999_endringer}
+plot_h1b_s1999_diff <- ggplot(h1b_s1999, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1b_s1999$endring, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  geom_hline(yintercept = 0, 
+             color = "black", linetype =  "dashed") +
+
+  labs(x = "År",
+       y = "Prosentvis endring i antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(2000,2024), breaks = seq(2000,2024, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h1b_s1999_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1b_s1999_ttest}
+ttest_h1b_s1999 <- t.test(h1b_s1999$endring, alternative = "greater", mu = 0)
+
+cat("P-verdi:", ttest_h1b_s1999$p.value, 
+    ifelse(test = ttest_h1b_s1999$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+# 3 Oppmerksomhet (H1+)
+
+I del 3 vil jeg se på fordelingen av oppmerksom over ulike policytemaer og over tid.
+
+## 3.1 Utgifter
+
+Jeg analyserer oppmerksomhet med utgangspunkt i budsjettposter og deretter med utgangspunkt i beløp.
+
+```{r, h1_u}
+h1_u <- b %>% filter(kap < 3000)
+```
+
+### 3.1.1 Oppmerksomhet etter policytema
+
+Plott av fordelingen av antall poster per kapittel over policytema:
+
+```{r, h1_unorcap}
+h1_unorcap <- h1_u %>%
+  count(hovedkat_t, name = "Antall")
+
+h1_unorcap <- h1_unorcap %>%
+  mutate("Andel" = (Antall / sum(Antall))* 100) %>%
+  arrange(Antall)
+
+h1_unorcap$hovedkat_t <- factor(h1_unorcap$hovedkat_t,
+                                levels = h1_unorcap$hovedkat_t)
+
+plot_h1_unorcap <- ggplot(h1_unorcap, aes(x = hovedkat_t, y = Antall)) +
+  geom_col(fill = "blue", alpha = 0.7) +
+  coord_flip() +
+  labs(title = "Strukturell oppmerksomhet (utgifter)",
+       x = "Hovedkategori",
+       y = "Antall (andel) observasjoner") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_y_continuous(breaks =  seq(0, 3500, 500), limits = c(0, 3500)) +
+  geom_text(aes(label = paste(round(Andel,1), "%")),
+            position = position_nudge(y = 200, x = 0.02),
+            size = 3,
+            color = "black")
+
+plot_h1_unorcap
+```
+
+Plott av den relative oppmerksomheten for hvert policyområde over tid:
+
+```{r, h1_unorcap_oppmerk}
+h1_unorcap_oppmerk <- h1a_u %>%
+  group_by(år) %>%
+  count(hovedkat_t, name = "Antall") %>%
+  ungroup()
+
+h1_unorcap_oppmerk <- h1_unorcap_oppmerk %>%
+  group_by(år) %>%
+  mutate("Andel" = (Antall / sum(Antall))) %>%
+  arrange(Antall) %>%
+  ungroup()
+
+h1_unorcap_oppmerk$hovedkat_t <- factor(h1_unorcap_oppmerk$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+
+plot_h1_unorcap_oppmerk <- ggplot(h1_unorcap_oppmerk, 
+                                  aes(x = år, y = Andel, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "(2) Strukturell oppmerksomhet",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_oppmerk
+```
+
+### 3.1.2 Andel av statsbudsjettet
+
+I tillegg til oppmerksomhet i form av poster per kapittel, kan vi se på andelen hvert beløp utgjør av statsbudsjettet.
+
+```{r, h1_unorcap_area}
+h1_unorcap_area <- h1_u %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+h1_unorcap_area$hovedkat_t <- factor(h1_unorcap_area$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_unorcap_area_gb}
+plot_h1_unorcap_area_gb <- ggplot(h1_unorcap_area, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet (Gul bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_area_gb
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Blå bok:
+
+```{r, h1_unorcap_area_bb}
+plot_h1_unorcap_area_bb <- ggplot(h1_unorcap_area, aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet (Blå bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_area_bb
+```
+
+Jeg justerer for SPU:
+
+```{r, h1_unorcap_area_justert1}
+h1_u <- h1_u %>% filter(!kap == 2800) # Overføringer til SPU
+
+h1_unorcap_area_justert <- h1_u %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+h1_unorcap_area_justert$hovedkat_t <- factor(h1_unorcap_area_justert$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_unorcap_area_justert1_gb}
+plot_h1_unorcap_area_justert_gb <- ggplot(h1_unorcap_area_justert, 
+                                          aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet, justert for SPU (Gul bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_area_justert_gb
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Blå bok:
+
+```{r, h1_unorcap_area_justert1_bb}
+plot_h1_unorcap_area_justert_bb <- ggplot(h1_unorcap_area_justert, 
+                                          aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet, justert for SPU (Blå bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_area_justert_bb
+```
+
+Jeg justerer for statsgjeld:
+
+```{r, h1_unorcap_area_justert2}
+h1_u <- h1_u %>% filter(!kap == 1650) %>% filter(!kap == 1651) # Statsgjeld
+
+h1_unorcap_area_justert <- h1_u %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+h1_unorcap_area_justert$hovedkat_t <- factor(h1_unorcap_area_justert$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_unorcap_area_justert2_gb}
+plot_h1_unorcap_area_justert_gb <- ggplot(h1_unorcap_area_justert, 
+                                          aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "(1) Monetær oppmerksomhet",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_area_justert_gb
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_unorcap_area_justert2_bb}
+plot_h1_unorcap_area_justert_bb <- ggplot(h1_unorcap_area_justert, 
+                                          aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet, justert for SPU og statsgjeld (Blå bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_unorcap_area_justert_bb
+```
+
+## 3.2 Inntekter
+
+Jeg analyserer oppmerksomhet med utgangspunkt i budsjettposter og deretter med utgangspunkt i beløp.
+
+```{r, h1_i}
+h1_i <- b %>% filter(kap >= 3000)
+```
+
+### 3.2.1 Strukturell oppmerksomhet
+
+Plott av fordelingen av antall poster per kapittel over policytema:
+
+```{r, h1_inorcap}
+h1_inorcap <- h1a_i %>%
+  count(hovedkat_t, name = "Antall")
+
+h1_inorcap <- h1_inorcap %>%
+  mutate("Andel" = (Antall / sum(Antall))* 100) %>%
+  arrange(Antall)
+
+h1_inorcap$hovedkat_t <- factor(h1_inorcap$hovedkat_t,
+                                levels = h1_inorcap$hovedkat_t)
+
+plot_h1_inorcap <- ggplot(h1_inorcap, aes(x = hovedkat_t, y = Antall)) +
+  geom_col(fill = "blue", alpha = 0.7) +
+  coord_flip() +
+  labs(title = "Strukturell oppmerksomhet (inntekter)",
+       x = "Hovedkategori",
+       y = "Antall (andel) observasjoner") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_y_continuous(breaks =  seq(0, 1300, 200), limits = c(0, 1300)) +
+  geom_text(aes(label = paste(round(Andel,1), "%")),
+            position = position_nudge(y = 80, x = 0.02),
+            size = 3,
+            color = "black")
+
+plot_h1_inorcap
+```
+
+Plott av den relative oppmerksomheten for hvert policyområde over tid:
+
+```{r, h1_inorcap_oppmerk}
+h1_inorcap_oppmerk <- h1a_i %>%
+  group_by(år) %>%
+  count(hovedkat_t, name = "Antall") %>%
+  ungroup()
+
+h1_inorcap_oppmerk <- h1_inorcap_oppmerk %>%
+  group_by(år) %>%
+  mutate("Andel" = (Antall / sum(Antall))) %>%
+  arrange(Antall) %>%
+  ungroup()
+
+h1_inorcap_oppmerk$hovedkat_t <- factor(h1_inorcap_oppmerk$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+
+plot_h1_inorcap_oppmerk <- ggplot(h1_inorcap_oppmerk, 
+                                  aes(x = år, y = Andel, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "(2) Strukturell oppmerksomhet",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_oppmerk
+```
+
+### 3.2.2 Monetær oppmerksomhet
+
+I tillegg til oppmerksomhet i form av poster per kapittel, kan vi se på andelen hvert beløp utgjør av statsbudsjettet.
+
+```{r, h1_inorcap_area}
+h1_inorcap_area <- h1_i %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+h1_inorcap_area$hovedkat_t <- factor(h1_inorcap_area$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_inorcap_area_gb}
+plot_h1_inorcap_area_gb <- ggplot(h1_inorcap_area, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+labs(
+    title = "Monetær oppmerksomhet (Gul bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_area_gb
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Blå bok:
+
+```{r, h1_inorcap_area_bb}
+plot_h1_inorcap_area_bb <- ggplot(h1_inorcap_area, aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+labs(
+    title = "Monetær oppmerksomhet (Blå bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_area_bb
+```
+
+Jeg justerer for SPU og statslånemidler:
+
+```{r, h1_inorcap_area_justert1}
+h1_i <- h1_i %>% filter(!kap == 5800) # Overføringer fra SPU
+h1_i <- h1_i %>% filter(!kap == 5999) # Statslånemidler
+
+h1_inorcap_area_justert <- h1_i %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+h1_inorcap_area_justert$hovedkat_t <- factor(h1_inorcap_area_justert$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_inorcap_area_justert1_gb}
+plot_h1_inorcap_area_justert_gb <- ggplot(h1_inorcap_area_justert, 
+                                          aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "(1) Monetær oppmerksomhet",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_area_justert_gb
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Blå bok:
+
+```{r, h1_inorcap_area_justert1_bb}
+plot_h1_inorcap_area_justert_bb <- ggplot(h1_inorcap_area_justert, 
+                                          aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet, justert for SPU og statsgjeld (Blå bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_area_justert_bb
+```
+
+Jeg justerer for skatter og avgifter:
+
+```{r, h1_inorcap_area_justert2}
+h1_i <- h1_i %>% filter(!serie_t == "Skatter og avgifter") # Skatter og avgifter
+
+h1_inorcap_area_justert <- h1_i %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+h1_inorcap_area_justert$hovedkat_t <- factor(h1_inorcap_area_justert$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_inorcap_area_justert2_gb}
+plot_h1_inorcap_area_justert_gb <- ggplot(h1_inorcap_area_justert, 
+                                          aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet, justert for SPU, statsgjeld og skatt (Gul bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_area_justert_gb
+```
+
+Plott av andelen av statsbudsjettets totale beløp for hvert policyområde for Gul bok:
+
+```{r, h1_inorcap_area_justert2_bb}
+plot_h1_inorcap_area_justert_bb <- ggplot(h1_inorcap_area_justert, 
+                                          aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Monetær oppmerksomhet, justert for SPU, statsgjeld og skatt (Blå bok)",
+    x = "År",
+    y = "Relativ oppmerksomhet",
+    fill = "Policytema"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+
+plot_h1_inorcap_area_justert_bb
+```
+
+# X Kontroll
+
+## Kontroll 1: Budsjettposter
+
+Jeg kontrollerer for valgår
+
+```{r}
+plot_kontroll1 <- ggplot(h1a_ukappost, aes(x = år, y = Antall)) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, 
+             color = "red", linetype = "longdash") +
+  geom_smooth(aes(group = valgperiode), 
+              method = "lm", se = TRUE, linewidth = 0.8, alpha = 0.2, show.legend = FALSE) +
+  geom_vline(xintercept = 2001, colour = "black") +
+  geom_vline(xintercept = 2005, colour = "black") +
+  geom_vline(xintercept = 2009, colour = "black") +
+  geom_vline(xintercept = 2013, colour = "black") +
+  geom_vline(xintercept = 2017, colour = "black") +
+  geom_vline(xintercept = 2021, colour = "black") +
+  labs(title = "Utgifter", x = "År",
+       y = "Antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_kontroll1
+```
+
+Jeg tar regresjonen av antall poster for hvert kapittel over år (den røde linjen):
+
+```{r, h1a_ukappost_regresjon}
+mod_kontroll1 <- lm(Antall ~ år + valgperiode, data = h1a_ukappost)
+
+summary(mod_kontroll1)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r}
+plot_kontroll1_diff <- ggplot(h1a_ukappost, aes(x = år, y = endring)) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, 
+             color = "red", linetype = "dashed") +
+  geom_smooth(aes(group = valgperiode), 
+              method = "lm", se = TRUE, linewidth = 0.8, alpha = 0.2, show.legend = FALSE) +
+  geom_vline(xintercept = 2001, colour = "black") +
+  geom_vline(xintercept = 2005, colour = "black") +
+  geom_vline(xintercept = 2009, colour = "black") +
+  geom_vline(xintercept = 2013, colour = "black") +
+  geom_vline(xintercept = 2017, colour = "black") +
+  geom_vline(xintercept = 2021, colour = "black") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  labs(title = "Utgifter", x = "År",
+       y = "Prosentvis endring i antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_kontroll1_diff
+```
+
+## Kontroll 2: Kapittel
+
+Jeg kontrollerer for valgår:
+
+```{r}
+plot_kontroll2 <- ggplot(h1a_ukap, aes(x = år, y = Antall)) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, 
+             color = "red", linetype = "longdash") +
+  geom_smooth(aes(group = valgperiode), 
+              method = "lm", se = TRUE, linewidth = 0.8, alpha = 0.2, show.legend = FALSE) +
+  geom_vline(xintercept = 2001, colour = "black") +
+  geom_vline(xintercept = 2005, colour = "black") +
+  geom_vline(xintercept = 2009, colour = "black") +
+  geom_vline(xintercept = 2013, colour = "black") +
+  geom_vline(xintercept = 2017, colour = "black") +
+  geom_vline(xintercept = 2021, colour = "black") +
+  labs(title = "Utgifter", x = "År",
+       y = "Antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_kontroll2
+```
+
+Jeg tar regresjonen av antall poster for hvert kapittel over år (den røde linjen):
+
+```{r}
+mod_kontroll2 <- lm(Antall ~ år + valgperiode, data = h1a_ukap)
+
+summary(mod_kontroll2)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r}
+plot_kontroll2_diff <- ggplot(h1a_ukap, aes(x = år, y = endring)) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, 
+             color = "red", linetype = "dashed") +
+  geom_smooth(aes(group = valgperiode), 
+              method = "lm", se = TRUE, linewidth = 0.8, alpha = 0.2, show.legend = FALSE) +
+  geom_vline(xintercept = 2001, colour = "black") +
+  geom_vline(xintercept = 2005, colour = "black") +
+  geom_vline(xintercept = 2009, colour = "black") +
+  geom_vline(xintercept = 2013, colour = "black") +
+  geom_vline(xintercept = 2017, colour = "black") +
+  geom_vline(xintercept = 2021, colour = "black") +
+  labs(title = "Utgifter", x = "År",
+       y = "Prosentvis endring i antall poster per kapittel") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_kontroll2_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r}
+test <- h1a_ukap %>%
+  filter(år > 2014)
+
+test <- test %>%
+  filter(!år == 2020)
+
+
+ttest_kontroll2 <- t.test(test$endring, alternative = "less", mu = 0)
+ttest_kontroll2
+```
+
+```{r}
+
+kontroll3 <- ggplot(h1b_s1999, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h1b_s1999$endring, na.rm = TRUE), 
+             color = "blue", linetype =  "dashed") +
+  geom_vline(xintercept = 2001, colour = "red", alpha = 0.5) +
+  geom_vline(xintercept = 2005, colour = "red", alpha = 0.5) +
+  geom_vline(xintercept = 2009, colour = "red", alpha = 0.5) +
+  geom_vline(xintercept = 2013, colour = "red", alpha = 0.5) +
+  geom_vline(xintercept = 2017, colour = "red", alpha = 0.5) +
+  geom_vline(xintercept = 2021, colour = "red", alpha = 0.5) +
+  geom_vline(xintercept = 2001+2, colour = "orange", alpha = 0.5) +
+  geom_vline(xintercept = 2005+2, colour = "orange", alpha = 0.5) +
+  geom_vline(xintercept = 2009+2, colour = "orange", alpha = 0.5) +
+  geom_vline(xintercept = 2013+2, colour = "orange", alpha = 0.5) +
+  geom_vline(xintercept = 2017+2, colour = "orange", alpha = 0.5) +
+  geom_vline(xintercept = 2021+2, colour = "orange", alpha = 0.5) +
+  geom_hline(yintercept = 0, 
+             color = "black", linetype =  "dashed") +
+
+  labs(x = "År",
+       y = "Prosentvis endring i antall sider") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(limits= c(2000,2024), breaks = seq(2000,2024, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+kontroll3
+```

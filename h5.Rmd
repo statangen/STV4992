@@ -1,0 +1,1142 @@
+---
+title: "Analysenotat: Hypotese 5"
+author: "T. Tangen"
+date: "2025-03-17"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(haven)
+library(ggplot2)
+library(tinytable)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(zoo)
+library(PxWebApiData)
+library(jsonlite)
+library(httr)
+library(sf)
+library(MASS)
+library(sandwich)
+library(stargazer)
+library(moments)
+library(DescTools)
+library(e1071)
+library(lmom)
+library(ineq)
+options(scipen=999)
+```
+
+```{r, oppsett, include=FALSE}
+b <- read_excel("b.xlsx", 1)
+kpi <- read_excel("inflasjon.xlsx", 1)
+kpi <- kpi %>%
+  dplyr::select(1:2)
+b <-     b %>%
+  left_join(kpi, by = "år") %>%
+  mutate(gb_kpi = gb * (100 / kpi_2015)) %>%
+  mutate(bb_kpi = bb * (100 / kpi_2015))
+b <- b %>% dplyr::select(!kpi_2015)
+b <- b %>% filter(!(bb == 0 & gb == 0))
+b <- b %>% mutate(gb_bb_endring = bb_kpi/gb_kpi - 1)
+u <- b %>% filter(kap < 3000)
+i <- b %>% filter(kap >= 3000)
+
+u <- u %>% filter(!(kap >= 2445 & kap <= 2499)) # Utgifter til statens forretningsdrift
+i <- i %>% filter(!(kap >= 5445 & kap <= 5499)) # Inntekter til statens forretningsdrift
+u <- u %>% filter(!kap == 1650) %>% filter(!kap == 1651) # Statsgjeld
+i <- i %>% filter(!kap == 5341) # Avdrag på fordringer
+i <- i %>% filter(!kap == 5999) # Statslånemidler
+
+u <- u %>% filter(!kap == 2800)
+
+apc_kap <- function(df) {
+  df %>%
+    group_by(kap_t, år) %>%
+    summarise(
+      gb = sum(gb, na.rm = TRUE),
+      bb = sum(bb, na.rm = TRUE),
+      gb_kpi = sum(gb_kpi, na.rm = TRUE),
+      bb_kpi = sum(bb_kpi, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(kap_t, år) %>%
+    group_by(kap_t) %>%
+    mutate(
+      lag_år = lag(år),
+      lag_gb = lag(gb),
+      lag_bb = lag(bb),
+      lag_gb_kpi = lag(gb_kpi),
+      lag_bb_kpi = lag(bb_kpi),
+      
+      gb_nomendring = if_else(år - lag_år == 1, gb - lag_gb, NA_real_),
+      bb_nomendring = if_else(år - lag_år == 1, bb - lag_bb, NA_real_),
+      gb_kpi_nomendring = if_else(år - lag_år == 1, gb_kpi - lag_gb_kpi, NA_real_),
+      bb_kpi_nomendring = if_else(år - lag_år == 1, bb_kpi - lag_bb_kpi, NA_real_),
+
+      gb_endring = case_when(
+        år - lag_år == 1 & lag_gb > 0 & gb == 0 ~ -100,
+        år - lag_år == 1 & lag_gb == 0 & gb == 0 ~ 0,
+        år - lag_år == 1 ~ (gb - lag_gb) / lag_gb * 100,
+        TRUE ~ NA_real_),
+      
+      bb_endring = case_when(
+        år - lag_år == 1 & lag_bb > 0 & bb == 0 ~ -100,
+        år - lag_år == 1 & lag_bb == 0 & bb == 0 ~ 0,
+        år - lag_år == 1 ~ (bb - lag_bb) / lag_bb * 100,
+        TRUE ~ NA_real_),
+      
+      gb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_gb_kpi > 0 & gb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_gb_kpi == 0 & gb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (gb_kpi - lag_gb_kpi) / lag_gb_kpi * 100,
+        TRUE ~ NA_real_),
+      
+      bb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_bb_kpi > 0 & bb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_bb_kpi == 0 & bb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (bb_kpi - lag_bb_kpi) / lag_bb_kpi * 100,
+        TRUE ~ NA_real_)
+      
+    ) %>%
+    dplyr::select(-lag_år, -lag_gb, -lag_bb, -lag_gb_kpi, -lag_bb_kpi) %>%
+    ungroup()
+}
+apc_post <- function(df) {
+  df %>%
+    arrange(as.numeric(post_id), år) %>%
+    group_by(post_id) %>%
+    mutate(
+      lag_år = lag(år),
+      lag_gb = lag(gb),
+      lag_bb = lag(bb),
+      lag_gb_kpi = lag(gb_kpi),
+      lag_bb_kpi = lag(bb_kpi),
+      
+      gb_nomendring = if_else(år - lag_år == 1, gb - lag_gb, NA_real_),
+      bb_nomendring = if_else(år - lag_år == 1, bb - lag_bb, NA_real_),
+      gb_kpi_nomendring = if_else(år - lag_år == 1, gb_kpi - lag_gb_kpi, NA_real_),
+      bb_kpi_nomendring = if_else(år - lag_år == 1, bb_kpi - lag_bb_kpi, NA_real_),
+      
+      gb_endring = case_when(
+        år - lag_år == 1 & lag_gb > 0 & gb == 0 ~ -100,
+        år - lag_år == 1 & lag_gb == 0 & gb == 0 ~ 0,
+        år - lag_år == 1 ~ (gb - lag_gb) / lag_gb * 100,
+        TRUE ~ NA_real_),
+      
+      bb_endring = case_when(
+        år - lag_år == 1 & lag_bb > 0 & bb == 0 ~ -100,
+        år - lag_år == 1 & lag_bb == 0 & bb == 0 ~ 0,
+        år - lag_år == 1 ~ (bb - lag_bb) / lag_bb * 100,
+        TRUE ~ NA_real_),
+      
+      gb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_gb_kpi > 0 & gb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_gb_kpi == 0 & gb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (gb_kpi - lag_gb_kpi) / lag_gb_kpi * 100,
+        TRUE ~ NA_real_),
+      
+      bb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_bb_kpi > 0 & bb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_bb_kpi == 0 & bb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (bb_kpi - lag_bb_kpi) / lag_bb_kpi * 100,
+        TRUE ~ NA_real_)
+      
+    ) %>%
+    dplyr::select(-lag_år, -lag_gb, -lag_bb, -lag_gb_kpi, -lag_bb_kpi) %>%
+    ungroup()
+}
+apc_norcap <- function(df) {
+  df %>%
+    group_by(norcap, år) %>%
+    summarise(
+      gb = sum(gb, na.rm = TRUE),
+      bb = sum(bb, na.rm = TRUE),
+      gb_kpi = sum(gb_kpi, na.rm = TRUE),
+      bb_kpi = sum(bb_kpi, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(norcap, år) %>%
+    group_by(norcap) %>%
+    mutate(
+      lag_år = lag(år),
+      
+      gb_nomendring = if_else(år - lag_år == 1, gb - lag(gb), NA_real_),
+      bb_nomendring = if_else(år - lag_år == 1, bb - lag(bb), NA_real_),
+      gb_kpi_nomendring = if_else(år - lag_år == 1, gb_kpi - lag(gb_kpi), NA_real_),
+      bb_kpi_nomendring = if_else(år - lag_år == 1, bb_kpi - lag(bb_kpi), NA_real_),
+      
+      gb_endring = ifelse(år - lag_år == 1, (gb - lag(gb)) / lag(gb) * 100, NA),
+      bb_endring = ifelse(år - lag_år == 1, (bb - lag(bb)) / lag(bb) * 100, NA),
+      gb_kpi_endring = ifelse(år - lag_år == 1, (gb_kpi - lag(gb_kpi)) / lag(gb_kpi) * 100, NA),
+      bb_kpi_endring = ifelse(år - lag_år == 1, (bb_kpi - lag(bb_kpi)) / lag(bb_kpi) * 100, NA)
+    ) %>%
+    dplyr::select(-lag_år) %>%
+    ungroup()
+}
+add_kap <- function(add_to, add_from) {
+  kaplist <- data.frame(kap_t = unique(add_from$kap_t))
+  kaplist <- kaplist %>%
+    left_join(
+      add_from %>% group_by(kap_t) %>% 
+        summarise(kap = first(kap), .groups = "drop"), by = "kap_t")
+  add_to <- add_to %>%
+    left_join(kaplist, by = "kap_t")
+}
+ukap <- apc_kap(u)
+upost <- apc_post(u)
+unorcap <- apc_norcap(u)
+ikap <- apc_kap(i)
+ipost <- apc_post(i)
+inorcap <- apc_norcap(i)
+ukap <- add_kap(ukap, u)
+ikap <- add_kap(ikap, i)
+rens <- function(df) {
+  df <- df %>%
+    filter(!is.infinite(gb_endring)) %>%  
+    filter(!is.infinite(bb_endring)) %>%
+    filter(!is.infinite(gb_kpi_endring)) %>%  
+    filter(!is.infinite(bb_kpi_endring)) %>%
+    filter(!is.na(gb_endring) & 
+             !is.na(bb_endring) & 
+             !is.na(gb_kpi_endring) & 
+             !is.na(bb_kpi_endring))
+}
+ukap <- rens(ukap)
+upost <- rens(upost)
+unorcap <- rens(unorcap)
+ikap <- rens(ikap)
+ipost <- rens(ipost)
+inorcap <- rens(inorcap)
+reg <- read_excel("reg.xlsx", 1)
+ukap <- ukap %>%
+  left_join(reg, by = "år")
+unorcap <- unorcap %>%
+  left_join(reg, by = "år")
+ikap <- ikap %>%
+  left_join(reg, by = "år")
+inorcap <- inorcap %>%
+  left_join(reg, by = "år")
+sentraltendens <- function(x) {
+  freq_table <- table(x)
+  mode_candidates <- as.numeric(names(freq_table[freq_table == max(freq_table)]))
+  mode_val <- mode_candidates[1]
+  tol <- 1e-8
+  frekvens <- sum(abs(x - mode_val) < tol)
+  
+  c(Gjennomsnitt = mean(x), 
+    Median = median(x), 
+    Modus = mode_val, 
+    Frekvens = frekvens)
+}
+spredning <- function(x) {
+  c(Varians = var(x), 
+    SD = sd(x),
+    MAD = mad(x, constant = 1),
+    MADSD = mad(x))
+}
+
+mode <- function(v) {
+  unique_vals <- unique(v)          
+  unique_vals[which.max(tabulate(match(v, unique_vals)))]  
+}
+
+summary_statistics <- function(df) {
+
+  varlist <- list(
+    gb = df$gb,
+    bb = df$bb,
+    gb_kpi = df$gb_kpi,
+    bb_kpi = df$bb_kpi,
+    gb_nomendring = df$gb_nomendring,
+    bb_nomendring = df$bb_nomendring,
+    gb_kpi_nomendring = df$gb_kpi_nomendring,
+    bb_kpi_nomendring = df$bb_kpi_nomendring,
+    gb_endring = df$gb_endring,
+    bb_endring = df$bb_endring,
+    gb_kpi_endring = df$gb_kpi_endring,
+    bb_kpi_endring = df$bb_kpi_endring
+  )
+  
+  N <- numeric(length(varlist))
+  min_list <- numeric(length(varlist))
+  max_list <- numeric(length(varlist))
+  mean_list <- numeric(length(varlist))
+  median_list <- numeric(length(varlist))
+  mode_list <- numeric(length(varlist))
+  sd_list <- numeric(length(varlist))
+  madsd_list <- numeric(length(varlist))
+  q1_list <- numeric(length(varlist))
+  q3_list <- numeric(length(varlist))
+  
+  for (i in seq_along(varlist)) {
+    variabel <- varlist[[i]]
+    
+    N[i] <- length(variabel)
+    min_list[i] <- min(variabel, na.rm = TRUE)
+    max_list[i] <- max(variabel, na.rm = TRUE)
+    mean_list[i] <- mean(variabel, na.rm = TRUE)
+    median_list[i] <- median(variabel, na.rm = TRUE)
+    mode_list[i] <- mode(variabel)
+    sd_list[i] <- sd(variabel, na.rm = TRUE)
+    madsd_list[i] <- mad(variabel, na.rm = TRUE)
+    q1_list[i] <- quantile(variabel, 0.25, na.rm = TRUE)
+    q3_list[i] <- quantile(variabel, 0.75, na.rm = TRUE)
+  }
+  
+  sumstats <- data.frame(
+    Variabel = names(varlist),
+    N = N,
+    "Min" = min_list, 
+    "Max" = max_list,
+    "Mean" = mean_list,
+    "Median" = median_list,
+    "Mode" = mode_list,
+    "SD" = sd_list,
+    "MADSD" = madsd_list,
+    "Q1" = q1_list,
+    "Q3" = q3_list
+  )
+  
+  return(sumstats)
+}
+lkurt <- function(vec, navn) {
+  lmoments <- samlmu(vec, nmom = 4)
+  L_kurtosis <- lmoments[4]
+  normal_vec <- rnorm(length(vec), mean = mean(vec), sd = sd(vec))
+  lmoments_norm <- samlmu(normal_vec, nmom = 4)
+  L_kurtosis_norm <- lmoments_norm[4]
+  
+  return(data.frame(
+    L_kurtose = L_kurtosis, L_kurtose_norm = L_kurtosis_norm
+  ))
+}
+gini <- function(vec, navn) {
+  mid <- median(vec)  
+  right_side <- vec[vec > mid]
+  left_side <- vec[vec < mid]
+  left_side_inverted <- abs(left_side)
+  Gini_right <- ineq(right_side, type = "Gini")
+  Gini_left <- ineq(left_side_inverted, type = "Gini")
+  normal_vec <- rnorm(length(vec), mean = mean(vec), sd = sd(vec))
+  right_side_norm <- normal_vec[normal_vec > mid]
+  left_side_norm <- normal_vec[normal_vec < mid]
+  left_side_norm_inverted <- abs(left_side_norm)
+  Gini_right_norm <- ineq(right_side_norm, type = "Gini")
+  Gini_left_norm <- ineq(left_side_norm_inverted, type = "Gini")
+  return(data.frame(
+    Gini_right = Gini_right, Gini_left = Gini_left,
+    Gini_right_norm = Gini_right_norm, Gini_left_norm = Gini_left_norm
+  ))
+}
+tfordeling <- function(data, variabel) {
+  data.frame(variabel = rt(nrow(data), df = nrow(data)-1) * mad(variabel) + 
+               median(variabel))
+}
+freedman_diaconis <- function(data) {
+  iqr_value <- IQR(data, na.rm = TRUE)
+  n <- length(na.omit(data))
+  (2 * iqr_value) / (n^(1/3))
+}
+```
+
+```{r, navn}
+h5_navn <- c(
+  "Ingen handlingsregel",
+  "4 % handlingsregel",
+  "3 % handlingsregel",
+  "Ingen handlingsregel",
+  "4 % handlingsregel",
+  "3 % handlingsregel"
+)
+```
+
+```{r, plottfunksjoner}
+
+ggmass <- function(df, variabel, bin, title) {
+  ggplot(df, aes(x = variabel)) +
+  geom_histogram(bins = bin, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = title, 
+       x = "Årlig prosentvis endring",
+       y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+}
+
+ggmass3 <- function(df, variabel, title) {
+  ggplot(df, aes(x = variabel)) + 
+  geom_histogram(bins = 50, fill = "blue", alpha = 0.7) +
+  facet_wrap(~type, scales = "free_y", 
+             labeller = labeller(type = c(
+                 "prehr" = "(1) Ingen handlingsregel",
+                 "hr4" = "(2) Handlingsregel på 4 %",
+                 "hr3" = "(3) Handlingsregel på 3 %"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = title, 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+}
+
+ggdensityt <- function(df, variabel, bw, title) {
+  ggplot(df, aes(x = variabel)) +
+    geom_histogram(binwidth = bw, fill = "blue", alpha = 0.7, boundary = 0) +
+    stat_function(fun = function(x) {
+      dt((x - median(variabel)) / mad(variabel),
+         df = nrow(df) - 1) / mad(variabel) * sum(!is.na(variabel)) * bw
+    }, color = "red", size = 1) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    ) +
+    labs(title = title,
+         x = "Årlig prosentvis endring", 
+         y = "Frekvens") +
+    scale_x_continuous(limits = c(-100, 250), 
+                       breaks = seq(-100, 250, 50))
+}
+
+ggmasst <- function(df, variabel, bin, title) {
+  ggplot(df, aes(x = variabel)) +
+    geom_histogram(bins = bin, fill = "blue", alpha = 0.7) +
+    geom_histogram(data = tfordeling(df, variabel), aes(x = tvariabel), 
+                   bins = bin, fill = "red", alpha = 0.5) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    ) +
+    labs(title = title, 
+         x = "Årlig prosentvis endring", 
+         y = "Frekvens") +
+    scale_x_continuous(limits = c(-100, 250), 
+                       breaks = seq(-100, 250, 50))
+}
+
+ggdensitynorm <- function(df, variabel, bw, title) {
+  n <- nrow(df)
+  df_t <- n - 1
+  mean_val <- mean(variabel)
+  sd_val <- sd(variabel)
+  
+  x_min <- mean_val - 3 * sd_val
+  x_max <- mean_val + 4 * sd_val
+  x_vals <- seq(x_min, x_max, length.out = 1000)
+  
+  t_density <- dt((x_vals - mean_val)/sd_val, df = df_t) / sd_val * n * bw
+  t_df <- data.frame(x = x_vals, y = t_density)
+  
+  ggplot(df, aes(x = variabel)) +
+    geom_histogram(binwidth = bw, fill = "blue", 
+                   alpha = 0.7, color = "black", size = 0.2) +
+    geom_line(data = t_df, aes(x = x, y = y), 
+              color = "red", size = 1, alpha = 0.7) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5)
+    ) +
+    labs(
+      title = title,
+      x = "Årlig prosentvis endring",
+      y = "Frekvens"
+    ) +
+    scale_x_continuous(limits = c(x_min, x_max),
+                       breaks = scales::pretty_breaks(n = 10))
+}
+
+gggini <- function(df, title) {
+  giniplot <- df %>%
+    pivot_longer(cols = c(`Økninger (Gini RHS)`, `Reduksjoner (Gini LHS)`),
+                 names_to = "Side", values_to = "Gini")
+  
+  ggplot(giniplot, aes(x = factor(Datagrunnlag, levels = c(
+  "Ingen handlingsregel",
+  "4 % handlingsregel",
+  "3 % handlingsregel")), 
+    y = Gini, color = Bok, shape = Side, group = interaction(Bok, Side))) +
+    geom_point(size = 2) +
+    scale_color_manual(
+      values = c("Budsjettforslag" = "orange", "Budsjettvedtak" = "cornflowerblue")) +
+    scale_shape_manual(
+      values = c("Økninger (Gini RHS)" = 16, "Reduksjoner (Gini LHS)" = 15)) +
+    geom_errorbar(aes(ymin = Gini, ymax = Gini), width = 0.2, linewidth = 1) +
+    geom_line(size = 0.5, linetype = "dashed") + 
+    geom_hline(size = 0.5, 
+               yintercept = mean(c(giniplot$`Gini RHS (normal)`, 
+                                   giniplot$`Gini LHS (normal)`)), 
+               linetype = "dashed") + 
+    labs(title = title,
+         x = "",
+         y = "Gini-koeffisient",
+         color = "Budsjettdokument",   
+         shape = "Side") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+      legend.background = element_rect(color = "black", size = 0.2),  
+      legend.title = element_text(size = 10, face = "bold"),
+      legend.text = element_text(size = 8, color = "black")
+    ) +
+    scale_y_continuous(breaks = pretty_breaks(n=10), 
+                       limits = c(0.3, 1)) 
+}
+
+ggkurtose <- function(df, title) {
+ggplot(df, aes(x = factor(Datagrunnlag, levels = c(
+  "Ingen handlingsregel",
+  "4 % handlingsregel",
+  "3 % handlingsregel")), 
+  y = `L-kurtose`, color = Bok, group = Bok)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = `L-kurtose`, ymax = `L-kurtose`), 
+                width = 0.2, linewidth = 1) +
+  geom_line(size = 0.5, linetype = "dashed") + 
+  geom_hline(size = 0.5, yintercept = mean(df$`L-kurtose (normal)`), linetype = "dashed") +
+  scale_color_manual(values = c("Budsjettforslag" = "orange", "Budsjettvedtak" = "cornflowerblue")) +
+  labs(title = title,
+       x =,
+       y = "L-kurtose",
+       color = "Budsjettdokument") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = pretty_breaks(n=10)) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 10, color = "black")
+  )
+}
+
+gglorenz <- function(variabel) {
+  
+  lc_lhs <- Lc(abs(variabel[variabel <= median(variabel)]))
+  lc_rhs <- Lc(variabel[variabel > median(variabel)])
+  
+  lc_lhs <- data.frame(p = lc_lhs$p, L = lc_lhs$L) %>%
+    mutate(perf_likhet = p, lorenz = 1 - p,
+           curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+  
+  lc_rhs <- data.frame(p = lc_rhs$p, L = lc_rhs$L) %>%
+    mutate(perf_likhet = p, lorenz = 1 - p)
+  
+  plot_lc_lhs <- ggplot(lc_lhs, aes(x = lorenz)) +
+    geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+    geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+    geom_line(aes(y = L, color = curve_type), size = 1) +
+    geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+    scale_color_manual(
+      values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+      name = "Kurvetype"
+    ) +
+    scale_x_reverse() +
+    labs(
+      title = "Lorenz-kurve for venstre side",
+      x = "Reduksjoner (Gini LHS)",
+      y = "Andel av endringer"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+      legend.position = c(0.2, 0.9),
+      legend.background = element_rect(color = "black", size = 0.2),  
+      legend.title = element_blank(),
+      legend.text = element_text(size = 10, color = "black"),
+      legend.key.size = unit(0.4, "cm"))
+  
+  plot_lc_rhs <- ggplot(lc_rhs, aes(x = lorenz)) +
+    geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+    geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+    geom_line(aes(y = L), color = "blue", size = 1) +
+    geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+    labs(
+      title = "Lorenz-kurve for høyre side",
+      x = "Økninger (Gini RHS)",
+      y = NULL
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+      axis.title.y = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank())
+  
+  plot_lc <- grid.arrange(plot_lc_lhs, plot_lc_rhs, ncol = 2)
+  return(plot_lc)
+}
+```
+
+# Utgiftsanalyse (E)
+
+Innlesing av postinndeling:
+
+```{r, upost_Innlesing}
+h5_upost_prehr <- upost %>%
+  filter(år < 2002)
+h5_upost_hr4 <- upost %>%
+  filter(år > 2001)
+h5_upost_hr3 <- upost %>%
+  filter(år > 2017)
+
+
+h5_upost_list <- list(
+  h5_upost_prehr$gb_kpi_endring,
+  h5_upost_hr4$gb_kpi_endring,
+  h5_upost_hr3$gb_kpi_endring,
+  h5_upost_prehr$bb_kpi_endring,
+  h5_upost_hr4$bb_kpi_endring,
+  h5_upost_hr3$bb_kpi_endring
+)
+```
+
+Innlesing av kapittelinndeling:
+
+```{r, ukap_Innlesing}
+h5_ukap_prehr <- ukap %>%
+  filter(år < 2002)
+h5_ukap_hr4 <- ukap %>%
+  filter(år > 2001)
+h5_ukap_hr3 <- ukap %>%
+  filter(år > 2017)
+
+
+h5_ukap_list <- list(
+  h5_ukap_prehr$gb_kpi_endring,
+  h5_ukap_prehr$bb_kpi_endring,
+  h5_ukap_hr4$gb_kpi_endring,
+  h5_ukap_hr4$bb_kpi_endring,
+  h5_ukap_hr3$gb_kpi_endring,
+  h5_ukap_hr3$bb_kpi_endring
+)
+```
+
+Innlesing av NORCAP-inndeling:
+
+```{r, unorcap_Innlesing}
+h5_unorcap_prehr <- unorcap %>%
+  filter(år < 2002)
+h5_unorcap_hr4 <- unorcap %>%
+  filter(år > 2001)
+h5_unorcap_hr3 <- unorcap %>%
+  filter(år > 2017)
+
+h5_unorcap_list <- list(
+  h5_unorcap_prehr$gb_kpi_endring,
+  h5_unorcap_prehr$bb_kpi_endring,
+  h5_unorcap_hr4$gb_kpi_endring,
+  h5_unorcap_hr4$bb_kpi_endring,
+  h5_unorcap_hr3$gb_kpi_endring,
+  h5_unorcap_hr3$bb_kpi_endring
+)
+```
+
+## E-1 Kurtose-estimat
+
+### E-1.1 Post
+
+Resultater av L-kurtose:
+
+```{r, upost_Kurtose}
+h5_upost_lkurt <- do.call(rbind, lapply(h5_upost_list, lkurt))
+h5_upost_lkurt <- h5_upost_lkurt %>%
+  mutate(
+    Datagrunnlag = h5_navn,
+    Bok = c(
+      "Budsjettforslag",
+      "Budsjettforslag",
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettvedtak",
+      "Budsjettvedtak"
+      ),
+    N = c(lapply(h5_upost_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, Bok, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+tt(h5_upost_lkurt)
+```
+
+Plott av L-kurtose:
+
+```{r, upost_Kurtose_plott}
+plot_h5_upost_lkurt <- ggkurtose(h5_upost_lkurt, "Utgifter")
+plot_h5_upost_lkurt
+```
+
+### E-1.2 Kapittel
+
+Resultater av L-kurtose:
+
+```{r, ukap_Kurtose}
+h5_ukap_lkurt <- do.call(rbind, lapply(h5_ukap_list, lkurt))
+h5_ukap_lkurt <- h5_ukap_lkurt %>%
+  mutate(
+    Datagrunnlag = h5_navn,
+    Bok = c(
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak"
+    ),
+    N = c(lapply(h5_ukap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, Bok, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+tt(h5_ukap_lkurt)
+```
+
+Plott av L-kurtose:
+
+```{r, ukap_Kurtose_plott}
+plot_h5_ukap_lkurt <- ggkurtose(h5_ukap_lkurt, "Utgifter")
+plot_h5_ukap_lkurt
+```
+
+### E-1.3 NORCAP
+
+Resultater av L-kurtose:
+
+```{r, unorcap_Kurtose}
+h5_unorcap_lkurt <- do.call(rbind, lapply(h5_unorcap_list, lkurt))
+h5_unorcap_lkurt <- h5_unorcap_lkurt %>%
+  mutate(
+    Datagrunnlag = h5_navn,
+    Bok = c(
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak"
+    ),
+    N = c(lapply(h5_unorcap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, Bok, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+tt(h5_unorcap_lkurt)
+```
+
+Plott av L-kurtose:
+
+```{r, unorcap_Kurtose_plott}
+plot_h5_unorcap_lkurt <- ggkurtose(h5_unorcap_lkurt, "Utgifter")
+plot_h5_unorcap_lkurt
+```
+
+## E-2 Gini-koeffisienten
+
+### E-2.1 Post
+
+Resultater av Gini-koeffisienten:
+
+```{r, upost_Gini}
+h5_upost_gini <- do.call(rbind, lapply(h5_upost_list, gini))
+h5_upost_gini <- h5_upost_gini %>%
+  mutate(
+    Datagrunnlag = h5_navn,
+    Bok = c(
+      "Budsjettforslag",
+      "Budsjettforslag",
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettvedtak",
+      "Budsjettvedtak"
+    ),
+    N = c(lapply(h5_upost_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, Bok, N,
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Økninger (Gini RHS)" = Gini_right,
+         "Reduksjoner (Gini LHS)" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+tt(h5_upost_gini)
+```
+
+Plott av Gini-koeffisienten:
+
+```{r, upost_Gini_plott}
+plot_h5_upost_gini <- gggini(h5_upost_gini, "Utgifter")
+plot_h5_upost_gini
+```
+
+#### Hypotesetest H5
+
+```{r, bootstrap}
+split_df <- function(df1, df2, variabel) {
+  
+  median1 <- median(df1[[variabel]])
+  lhs1 <- df1[df1[[variabel]] < median1, ]
+  rhs1 <- df1[df1[[variabel]] >= median1, ]
+  lhs1 <- abs(lhs1[[variabel]])
+  rhs1 <- rhs1[[variabel]]
+  
+  median2 <- median(df2[[variabel]])
+  lhs2 <- df2[df2[[variabel]] < median2, ]
+  rhs2 <- df2[df2[[variabel]] >= median2, ]
+  lhs2 <- abs(lhs2[[variabel]])
+  rhs2 <- rhs2[[variabel]]
+  
+  return(list(lhs1 = lhs1, rhs1 = rhs1,
+              lhs2 = lhs2, rhs2 = rhs2))
+}
+
+gini_diff <- function(x, y) {
+  G1 <- ineq::Gini(x)
+  G2 <- ineq::Gini(y)
+  return(G1 - G2)
+}
+
+bootstrap_gini_test <- function(x, y, B = 10000, seed = 123) {
+  set.seed(seed)
+  
+  n_x <- length(x)
+  n_y <- length(y)
+  combined <- c(x, y)
+  
+  observed_diff <- gini_diff(x, y)
+  
+  boot_diffs <- replicate(B, {
+    resample <- sample(combined, size = n_x + n_y, replace = TRUE)
+    x_star <- resample[1:n_x]
+    y_star <- resample[(n_x+1):(n_x + n_y)]
+    gini_diff(x_star, y_star)
+  })
+  
+  p_val <- mean(abs(boot_diffs) >= abs(observed_diff))
+  
+  return(list(
+    observed_difference = observed_diff,
+    p_value = p_val,
+    bootstrap_distribution = boot_diffs
+  ))
+}
+```
+
+Hypotesetest av H5a:
+
+```{r, bstest_h5a}
+h5a_upost_split <- split_df(h5_upost_prehr, h5_upost_hr4, "gb_kpi_endring")
+
+Gini(h5a_upost_split$rhs1) -
+Gini(h5a_upost_split$rhs2) # Omvendt test
+bstest_h5a_gb_rhs <- bootstrap_gini_test(h5a_upost_split$rhs2, h5a_upost_split$rhs1)
+
+Gini(h5a_upost_split$lhs1) -
+Gini(h5a_upost_split$lhs2) # Omvendt test
+bstest_h5a_gb_lhs <- bootstrap_gini_test(h5a_upost_split$lhs2, h5a_upost_split$lhs1)
+
+h5a_upost_split <- split_df(h5_upost_prehr, h5_upost_hr4, "bb_kpi_endring")
+
+Gini(h5a_upost_split$rhs1) -
+Gini(h5a_upost_split$rhs2) # Omvendt test
+bstest_h5a_bb_rhs <- bootstrap_gini_test(h5a_upost_split$rhs2, h5a_upost_split$rhs1)
+
+
+Gini(h5a_upost_split$lhs1) -
+Gini(h5a_upost_split$lhs2) # Omvendt test
+bstest_h5a_bb_lhs <- bootstrap_gini_test(h5a_upost_split$lhs2, h5a_upost_split$lhs1)
+```
+
+Hypotesetest av H5b:
+
+```{r, bstest_h5b}
+h5b_upost_split <- split_df(h5_upost_hr4, h5_upost_hr3, "gb_kpi_endring")
+
+Gini(h5b_upost_split$rhs1) -
+Gini(h5b_upost_split$rhs2) # Vi kan allerede se at denne ikke er signifikant
+bstest_h5b_gb_rhs <- bootstrap_gini_test(h5b_upost_split$rhs1, h5b_upost_split$rhs2)
+
+Gini(h5b_upost_split$lhs1) -
+Gini(h5b_upost_split$lhs2)
+bstest_h5b_gb_lhs <- bootstrap_gini_test(h5b_upost_split$lhs1, h5b_upost_split$lhs2)
+
+h5b_upost_split <- split_df(h5_upost_hr4, h5_upost_hr3, "bb_kpi_endring")
+
+Gini(h5b_upost_split$rhs1) -
+Gini(h5b_upost_split$rhs2)
+bstest_h5b_bb_rhs <- bootstrap_gini_test(h5b_upost_split$rhs1, h5b_upost_split$rhs2)
+
+Gini(h5b_upost_split$lhs1) -
+Gini(h5b_upost_split$lhs2)
+bstest_h5b_bb_lhs <- bootstrap_gini_test(h5b_upost_split$lhs1, h5b_upost_split$lhs2)
+```
+
+Oversikt:
+
+```{r, bstest_results}
+
+signif <- function(p) {
+  ifelse(p <= 0.001, "***", 
+       ifelse(p <= 0.01, "**", 
+              ifelse(p <= 0.05, "*", 
+                     ifelse(p <= 0.1, ".", ""))))
+}
+
+bstest_results <- data.frame(
+  Hypotese = rep(c("H5a", "H5b"), 2),
+  Påstand = rep(c("G(HR=0) < G(HR=4)", "G(HR=4) > G(HR=3)"), 2),
+  Dokument = c(rep("Budsjettforslag", 2), rep("Budsjettvedtak", 2)),
+  P_lhs = c(bstest_h5a_gb_lhs$p_value, 
+            bstest_h5b_gb_lhs$p_value,
+            bstest_h5a_bb_lhs$p_value, 
+            bstest_h5b_bb_lhs$p_value),
+  Sign_lhs = c(signif(bstest_h5a_gb_lhs$p_value), 
+               signif(bstest_h5b_gb_lhs$p_value),
+               signif(bstest_h5a_bb_lhs$p_value), 
+               signif(bstest_h5b_bb_lhs$p_value)),
+  P_rhs = c(bstest_h5a_gb_rhs$p_value, 
+            bstest_h5b_gb_rhs$p_value,
+            bstest_h5a_bb_rhs$p_value, 
+            bstest_h5b_bb_rhs$p_value),
+  Sign_rhs = c(signif(bstest_h5a_gb_rhs$p_value), 
+               signif(bstest_h5b_gb_rhs$p_value),
+               signif(bstest_h5a_bb_rhs$p_value), 
+               signif(bstest_h5b_bb_rhs$p_value)))
+tt(bstest_results)
+```
+
+### E-2.2 Kapittel
+
+Resultater av Gini-koeffisienten:
+
+```{r, ukap_Gini}
+h5_ukap_gini <- do.call(rbind, lapply(h5_ukap_list, gini))
+h5_ukap_gini <- h5_ukap_gini %>%
+  mutate(
+    Datagrunnlag = h5_navn,
+    Bok = c(
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak"
+    ),
+    N = c(lapply(h5_ukap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, Bok, N,
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Økninger (Gini RHS)" = Gini_right,
+         "Reduksjoner (Gini LHS)" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+tt(h5_ukap_gini)
+```
+
+Plott av Gini-koeffisienten:
+
+```{r, ukap_Gini_plott}
+plot_h5_ukap_gini <- gggini(h5_ukap_gini, "Utgifter")
+plot_h5_ukap_gini
+```
+
+### E-2.3 NORCAP
+
+Resultater av Gini-koeffisienten:
+
+```{r, unorcap_Gini}
+h5_unorcap_gini <- do.call(rbind, lapply(h5_unorcap_list, gini))
+h5_unorcap_gini <- h5_unorcap_gini %>%
+  mutate(
+    Datagrunnlag = h5_navn,
+    Bok = c(
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak",
+      "Budsjettforslag",
+      "Budsjettvedtak"
+    ),
+    N = c(lapply(h5_unorcap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, Bok, N,
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Økninger (Gini RHS)" = Gini_right,
+         "Reduksjoner (Gini LHS)" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+tt(h5_unorcap_gini)
+```
+
+Plott av Gini-koeffisienten
+
+```{r, unorcap_Gini_plott}
+plot_h5_unorcap_gini <- gggini(h5_unorcap_gini, "Utgifter")
+plot_h5_unorcap_gini
+```
+
+## E-3 Budsjettfordelinger
+
+### E-3.1 Postfordelinger
+
+Enkeltvise plott:
+
+```{r, upost_dist}
+plot_upost_gb_kpi_prehr <- ggmass(h5_upost_prehr, 
+                                  h5_upost_prehr$gb_kpi_endring, 
+                                  100, "Utgifter")
+
+plot_upost_gb_kpi_posthr4 <- ggmass(h5_upost_hr4, 
+                                    h5_upost_hr4$gb_kpi_endring, 
+                                    100, "Utgifter")
+
+plot_upost_gb_kpi_posthr3 <- ggmass(h5_upost_hr3, 
+                                    h5_upost_hr3$gb_kpi_endring, 
+                                    100, "Utgifter")
+plot_upost_gb_kpi_prehr
+plot_upost_gb_kpi_posthr4
+plot_upost_gb_kpi_posthr3
+```
+
+Pivottransformering:
+
+```{r, upost_bind}
+h5_upost_pivot <- bind_rows(
+  h5_upost_prehr %>% 
+    mutate(type = factor("prehr", 
+                         levels = c("prehr", "hr4",  "hr3"))),
+  h5_upost_hr4 %>% 
+    mutate(type = factor("hr4", 
+                         levels = c("prehr", "hr4",  "hr3"))),
+  h5_upost_hr3 %>% 
+    mutate(type = factor("hr3", 
+                         levels = c("prehr", "hr4",  "hr3")))
+)
+```
+
+Samlet plott:
+
+```{r, upost_samlet_avkortet}
+plot_h5_upost_samlet <- ggmass3(h5_upost_pivot, h5_upost_pivot$gb_kpi_endring, "Utgifter")
+plot_h5_upost_samlet
+```
+
+### E-3.2 Kapittelfordelinger
+
+Enkeltvise plott:
+
+```{r, ukap_dist}
+plot_ukap_gb_kpi_prehr <- ggmass(h5_ukap_prehr, 
+                                  h5_ukap_prehr$gb_kpi_endring, 
+                                  100, "Utgifter")
+
+plot_ukap_gb_kpi_posthr4 <- ggmass(h5_ukap_hr4, 
+                                    h5_ukap_hr4$gb_kpi_endring, 
+                                    100, "Utgifter")
+
+plot_ukap_gb_kpi_posthr3 <- ggmass(h5_ukap_hr3, 
+                                    h5_ukap_hr3$gb_kpi_endring, 
+                                    100, "Utgifter")
+plot_ukap_gb_kpi_prehr
+plot_ukap_gb_kpi_posthr4
+plot_ukap_gb_kpi_posthr3
+```
+
+Pivottransformering:
+
+```{r, ukap_bind}
+h5_ukap_pivot <- bind_rows(
+  h5_ukap_prehr %>% 
+    mutate(type = factor("prehr", 
+                         levels = c("prehr", "hr4",  "hr3"))),
+  h5_ukap_hr4 %>% 
+    mutate(type = factor("hr4", 
+                         levels = c("prehr", "hr4",  "hr3"))),
+  h5_ukap_hr3 %>% 
+    mutate(type = factor("hr3", 
+                         levels = c("prehr", "hr4",  "hr3")))
+)
+```
+
+Samlet plott:
+
+```{r, ukap_samlet_avkortet}
+plot_h5_ukap_samlet <- ggmass3(h5_ukap_pivot, h5_ukap_pivot$gb_kpi_endring, "Utgifter")
+plot_h5_ukap_samlet
+```
+
+### E-3.3 NORCAP-fordelinger
+
+Enkeltvise plott:
+
+```{r, unorcap_dist}
+plot_unorcap_gb_kpi_prehr <- ggmass(h5_unorcap_prehr, 
+                                  h5_unorcap_prehr$gb_kpi_endring, 
+                                  100, "Utgifter")
+
+plot_unorcap_gb_kpi_posthr4 <- ggmass(h5_unorcap_hr4, 
+                                    h5_unorcap_hr4$gb_kpi_endring, 
+                                    100, "Utgifter")
+
+plot_unorcap_gb_kpi_posthr3 <- ggmass(h5_unorcap_hr3, 
+                                    h5_unorcap_hr3$gb_kpi_endring, 
+                                    100, "Utgifter")
+plot_unorcap_gb_kpi_prehr
+plot_unorcap_gb_kpi_posthr4
+plot_unorcap_gb_kpi_posthr3
+```
+
+Pivottransformering:
+
+```{r, unorcap_bind}
+h5_unorcap_pivot <- bind_rows(
+  h5_unorcap_prehr %>% 
+    mutate(type = factor("prehr", 
+                         levels = c("prehr", "hr4",  "hr3"))),
+  h5_unorcap_hr4 %>% 
+    mutate(type = factor("hr4", 
+                         levels = c("prehr", "hr4",  "hr3"))),
+  h5_unorcap_hr3 %>% 
+    mutate(type = factor("hr3", 
+                         levels = c("prehr", "hr4",  "hr3")))
+)
+```
+
+Samlet plott:
+
+```{r, unorcap_samlet_avkortet}
+plot_h5_unorcap_samlet <- ggmass3(h5_unorcap_pivot, h5_unorcap_pivot$gb_kpi_endring, "Utgifter")
+plot_h5_unorcap_samlet
+```

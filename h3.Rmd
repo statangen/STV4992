@@ -1,0 +1,4097 @@
+---
+title: "Dokumentasjon: Budsjettatferd (H3)"
+author: "T. Tangen"
+date: "2025-03-17"
+output: html_document
+warning: false
+messages: false
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(haven)
+library(ggplot2)
+library(tinytable)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(zoo)
+library(PxWebApiData)
+library(jsonlite)
+library(httr)
+library(sf)
+library(MASS)
+library(sandwich)
+library(stargazer)
+library(moments)
+library(DescTools)
+library(e1071)
+library(lmom)
+library(ineq)
+library(scales)
+library(entropy)
+library(tidyr)
+library(gridExtra)
+options(scipen=999)
+```
+
+```{r, oppsett}
+b <- read_excel("b.xlsx", 1)
+kpi <- read_excel("inflasjon.xlsx", 1)
+kpi <- kpi %>%
+  dplyr::select(1:2)
+b <-     b %>%
+  left_join(kpi, by = "år") %>%
+  mutate(gb_kpi = gb * (100 / kpi_2015)) %>%
+  mutate(bb_kpi = bb * (100 / kpi_2015))
+b <- b %>% dplyr::select(!kpi_2015)
+b <- b %>% filter(!(bb == 0 & gb == 0))
+b <- b %>% mutate(gb_bb_endring = bb_kpi/gb_kpi - 1)
+u <- b %>% filter(kap < 3000)
+i <- b %>% filter(kap >= 3000)
+
+u <- u %>% filter(!(kap >= 2445 & kap <= 2499)) # Utgifter til statens forretningsdrift
+i <- i %>% filter(!(kap >= 5445 & kap <= 5499)) # Inntekter til statens forretningsdrift
+
+u <- u %>% filter(!kap == 1650) %>% filter(!kap == 1651) # Statsgjeld
+i <- i %>% filter(!kap == 5341) # Avdrag på fordringer
+i <- i %>% filter(!kap == 5999) # Statslånemidler
+
+apc_kap <- function(df) {
+  df %>%
+    group_by(kap_t, år) %>%
+    summarise(
+      gb = sum(gb, na.rm = TRUE),
+      bb = sum(bb, na.rm = TRUE),
+      gb_kpi = sum(gb_kpi, na.rm = TRUE),
+      bb_kpi = sum(bb_kpi, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(kap_t, år) %>%
+    group_by(kap_t) %>%
+    mutate(
+      lag_år = lag(år),
+      lag_gb = lag(gb),
+      lag_bb = lag(bb),
+      lag_gb_kpi = lag(gb_kpi),
+      lag_bb_kpi = lag(bb_kpi),
+      
+      gb_nomendring = if_else(år - lag_år == 1, gb - lag_gb, NA_real_),
+      bb_nomendring = if_else(år - lag_år == 1, bb - lag_bb, NA_real_),
+      gb_kpi_nomendring = if_else(år - lag_år == 1, gb_kpi - lag_gb_kpi, NA_real_),
+      bb_kpi_nomendring = if_else(år - lag_år == 1, bb_kpi - lag_bb_kpi, NA_real_),
+
+      gb_endring = case_when(
+        år - lag_år == 1 & lag_gb > 0 & gb == 0 ~ -100,
+        år - lag_år == 1 & lag_gb == 0 & gb == 0 ~ 0,
+        år - lag_år == 1 ~ (gb - lag_gb) / lag_gb * 100,
+        TRUE ~ NA_real_),
+      
+      bb_endring = case_when(
+        år - lag_år == 1 & lag_bb > 0 & bb == 0 ~ -100,
+        år - lag_år == 1 & lag_bb == 0 & bb == 0 ~ 0,
+        år - lag_år == 1 ~ (bb - lag_bb) / lag_bb * 100,
+        TRUE ~ NA_real_),
+      
+      gb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_gb_kpi > 0 & gb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_gb_kpi == 0 & gb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (gb_kpi - lag_gb_kpi) / lag_gb_kpi * 100,
+        TRUE ~ NA_real_),
+      
+      bb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_bb_kpi > 0 & bb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_bb_kpi == 0 & bb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (bb_kpi - lag_bb_kpi) / lag_bb_kpi * 100,
+        TRUE ~ NA_real_)
+      
+    ) %>%
+    dplyr::select(-lag_år, -lag_gb, -lag_bb, -lag_gb_kpi, -lag_bb_kpi) %>%
+    ungroup()
+}
+apc_post <- function(df) {
+  df %>%
+    arrange(as.numeric(post_id), år) %>%
+    group_by(post_id) %>%
+    mutate(
+      lag_år = lag(år),
+      lag_gb = lag(gb),
+      lag_bb = lag(bb),
+      lag_gb_kpi = lag(gb_kpi),
+      lag_bb_kpi = lag(bb_kpi),
+      
+      gb_nomendring = if_else(år - lag_år == 1, gb - lag_gb, NA_real_),
+      bb_nomendring = if_else(år - lag_år == 1, bb - lag_bb, NA_real_),
+      gb_kpi_nomendring = if_else(år - lag_år == 1, gb_kpi - lag_gb_kpi, NA_real_),
+      bb_kpi_nomendring = if_else(år - lag_år == 1, bb_kpi - lag_bb_kpi, NA_real_),
+      
+      gb_endring = case_when(
+        år - lag_år == 1 & lag_gb > 0 & gb == 0 ~ -100,
+        år - lag_år == 1 & lag_gb == 0 & gb == 0 ~ 0,
+        år - lag_år == 1 ~ (gb - lag_gb) / lag_gb * 100,
+        TRUE ~ NA_real_),
+      
+      bb_endring = case_when(
+        år - lag_år == 1 & lag_bb > 0 & bb == 0 ~ -100,
+        år - lag_år == 1 & lag_bb == 0 & bb == 0 ~ 0,
+        år - lag_år == 1 ~ (bb - lag_bb) / lag_bb * 100,
+        TRUE ~ NA_real_),
+      
+      gb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_gb_kpi > 0 & gb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_gb_kpi == 0 & gb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (gb_kpi - lag_gb_kpi) / lag_gb_kpi * 100,
+        TRUE ~ NA_real_),
+      
+      bb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_bb_kpi > 0 & bb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_bb_kpi == 0 & bb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (bb_kpi - lag_bb_kpi) / lag_bb_kpi * 100,
+        TRUE ~ NA_real_)
+      
+    ) %>%
+    dplyr::select(-lag_år, -lag_gb, -lag_bb, -lag_gb_kpi, -lag_bb_kpi) %>%
+    ungroup()
+}
+apc_norcap <- function(df) {
+  df %>%
+    group_by(norcap, år) %>%
+    summarise(
+      gb = sum(gb, na.rm = TRUE),
+      bb = sum(bb, na.rm = TRUE),
+      gb_kpi = sum(gb_kpi, na.rm = TRUE),
+      bb_kpi = sum(bb_kpi, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(norcap, år) %>%
+    group_by(norcap) %>%
+    mutate(
+      lag_år = lag(år),
+      
+      gb_nomendring = if_else(år - lag_år == 1, gb - lag(gb), NA_real_),
+      bb_nomendring = if_else(år - lag_år == 1, bb - lag(bb), NA_real_),
+      gb_kpi_nomendring = if_else(år - lag_år == 1, gb_kpi - lag(gb_kpi), NA_real_),
+      bb_kpi_nomendring = if_else(år - lag_år == 1, bb_kpi - lag(bb_kpi), NA_real_),
+      
+      gb_endring = ifelse(år - lag_år == 1, (gb - lag(gb)) / lag(gb) * 100, NA),
+      bb_endring = ifelse(år - lag_år == 1, (bb - lag(bb)) / lag(bb) * 100, NA),
+      gb_kpi_endring = ifelse(år - lag_år == 1, (gb_kpi - lag(gb_kpi)) / lag(gb_kpi) * 100, NA),
+      bb_kpi_endring = ifelse(år - lag_år == 1, (bb_kpi - lag(bb_kpi)) / lag(bb_kpi) * 100, NA)
+    ) %>%
+    dplyr::select(-lag_år) %>%
+    ungroup()
+}
+add_kap <- function(add_to, add_from) {
+  kaplist <- data.frame(kap_t = unique(add_from$kap_t))
+  kaplist <- kaplist %>%
+    left_join(
+      add_from %>% group_by(kap_t) %>% 
+        summarise(kap = first(kap), .groups = "drop"), by = "kap_t")
+  add_to <- add_to %>%
+    left_join(kaplist, by = "kap_t")
+}
+ukap <- apc_kap(u)
+upost <- apc_post(u)
+unorcap <- apc_norcap(u)
+ikap <- apc_kap(i)
+ipost <- apc_post(i)
+inorcap <- apc_norcap(i)
+ukap <- add_kap(ukap, u)
+ikap <- add_kap(ikap, i)
+rens <- function(df) {
+  df <- df %>%
+    filter(!is.infinite(gb_endring)) %>%  
+    filter(!is.infinite(bb_endring)) %>%
+    filter(!is.infinite(gb_kpi_endring)) %>%  
+    filter(!is.infinite(bb_kpi_endring)) %>%
+    filter(!is.na(gb_endring) & 
+             !is.na(bb_endring) & 
+             !is.na(gb_kpi_endring) & 
+             !is.na(bb_kpi_endring))
+}
+ukap <- rens(ukap)
+upost <- rens(upost)
+unorcap <- rens(unorcap)
+ikap <- rens(ikap)
+ipost <- rens(ipost)
+inorcap <- rens(inorcap)
+reg <- read_excel("reg.xlsx", 1)
+ukap <- ukap %>%
+  left_join(reg, by = "år")
+unorcap <- unorcap %>%
+  left_join(reg, by = "år")
+ikap <- ikap %>%
+  left_join(reg, by = "år")
+inorcap <- inorcap %>%
+  left_join(reg, by = "år")
+sentraltendens <- function(x) {
+  freq_table <- table(x)
+  mode_candidates <- as.numeric(names(freq_table[freq_table == max(freq_table)]))
+  mode_val <- mode_candidates[1]
+  tol <- 1e-8
+  frekvens <- sum(abs(x - mode_val) < tol)
+  
+  c(Gjennomsnitt = mean(x), 
+    Median = median(x), 
+    Modus = mode_val, 
+    Frekvens = frekvens)
+}
+spredning <- function(x) {
+  c(Varians = var(x), 
+    SD = sd(x),
+    MAD = mad(x, constant = 1),
+    MADSD = mad(x))
+}
+
+mode <- function(v) {
+  unique_vals <- unique(v)          
+  unique_vals[which.max(tabulate(match(v, unique_vals)))]  
+}
+
+summary_statistics <- function(df) {
+
+  varlist <- list(
+    gb = df$gb,
+    bb = df$bb,
+    gb_kpi = df$gb_kpi,
+    bb_kpi = df$bb_kpi,
+    gb_nomendring = df$gb_nomendring,
+    bb_nomendring = df$bb_nomendring,
+    gb_kpi_nomendring = df$gb_kpi_nomendring,
+    bb_kpi_nomendring = df$bb_kpi_nomendring,
+    gb_endring = df$gb_endring,
+    bb_endring = df$bb_endring,
+    gb_kpi_endring = df$gb_kpi_endring,
+    bb_kpi_endring = df$bb_kpi_endring
+  )
+  
+  N <- numeric(length(varlist))
+  min_list <- numeric(length(varlist))
+  max_list <- numeric(length(varlist))
+  mean_list <- numeric(length(varlist))
+  median_list <- numeric(length(varlist))
+  mode_list <- numeric(length(varlist))
+  sd_list <- numeric(length(varlist))
+  madsd_list <- numeric(length(varlist))
+  q1_list <- numeric(length(varlist))
+  q3_list <- numeric(length(varlist))
+  
+  for (i in seq_along(varlist)) {
+    variabel <- varlist[[i]]
+    
+    N[i] <- length(variabel)
+    min_list[i] <- min(variabel, na.rm = TRUE)
+    max_list[i] <- max(variabel, na.rm = TRUE)
+    mean_list[i] <- mean(variabel, na.rm = TRUE)
+    median_list[i] <- median(variabel, na.rm = TRUE)
+    mode_list[i] <- mode(variabel)
+    sd_list[i] <- sd(variabel, na.rm = TRUE)
+    madsd_list[i] <- mad(variabel, na.rm = TRUE)
+    q1_list[i] <- quantile(variabel, 0.25, na.rm = TRUE)
+    q3_list[i] <- quantile(variabel, 0.75, na.rm = TRUE)
+  }
+  
+  sumstats <- data.frame(
+    Variabel = names(varlist),
+    N = N,
+    "Min" = min_list, 
+    "Max" = max_list,
+    "Mean" = mean_list,
+    "Median" = median_list,
+    "Mode" = mode_list,
+    "SD" = sd_list,
+    "MADSD" = madsd_list,
+    "Q1" = q1_list,
+    "Q3" = q3_list
+  )
+  
+  return(sumstats)
+}
+lkurt <- function(vec, navn) {
+  lmoments <- samlmu(vec, nmom = 4)
+  L_kurtosis <- lmoments[4]
+  normal_vec <- rnorm(length(vec), mean = mean(vec), sd = sd(vec))
+  lmoments_norm <- samlmu(normal_vec, nmom = 4)
+  L_kurtosis_norm <- lmoments_norm[4]
+  
+  return(data.frame(
+    L_kurtose = L_kurtosis, L_kurtose_norm = L_kurtosis_norm
+  ))
+}
+gini <- function(vec, navn) {
+  mid <- median(vec)  
+  right_side <- vec[vec > mid]
+  left_side <- vec[vec < mid]
+  left_side_inverted <- abs(left_side)
+  Gini_right <- ineq(right_side, type = "Gini")
+  Gini_left <- ineq(left_side_inverted, type = "Gini")
+  normal_vec <- rnorm(length(vec), mean = mean(vec), sd = sd(vec))
+  right_side_norm <- normal_vec[normal_vec > mid]
+  left_side_norm <- normal_vec[normal_vec < mid]
+  left_side_norm_inverted <- abs(left_side_norm)
+  Gini_right_norm <- ineq(right_side_norm, type = "Gini")
+  Gini_left_norm <- ineq(left_side_norm_inverted, type = "Gini")
+  return(data.frame(
+    Gini_right = Gini_right, Gini_left = Gini_left,
+    Gini_right_norm = Gini_right_norm, Gini_left_norm = Gini_left_norm
+  ))
+}
+tfordeling <- function(data, variabel) {
+  data.frame(tvariabel = rt(nrow(data), df = nrow(data)-1) * mad(variabel) + 
+               median(variabel))
+}
+freedman_diaconis <- function(data) {
+  iqr_value <- IQR(data, na.rm = TRUE)
+  n <- length(na.omit(data))
+  (2 * iqr_value) / (n^(1/3))
+}
+```
+
+```{r, navn}
+h3_navn <- c(
+  "Gul bok",
+  "Blå bok",
+  "Gul bok, KPI-justert",
+  "Blå bok, KPI-justert"
+)
+```
+
+```{r, plottfunksjoner}
+
+ggmass <- function(df, variabel, bin, title) {
+  ggplot(df, aes(x = variabel)) +
+  geom_histogram(bins = bin, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = title, 
+       x = "Årlig prosentvis endring",
+       y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+}
+
+ggdensityt <- function(df, variabel, bw, title) {
+  ggplot(df, aes(x = variabel)) +
+    geom_histogram(binwidth = bw, fill = "blue", alpha = 0.7, boundary = 0) +
+    stat_function(fun = function(x) {
+      dt((x - median(variabel)) / mad(variabel),
+         df = nrow(df) - 1) / mad(variabel) * sum(!is.na(variabel)) * bw
+    }, color = "red", size = 1) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    ) +
+    labs(title = title,
+         x = "Årlig prosentvis endring", 
+         y = "Frekvens") +
+    scale_x_continuous(limits = c(-100, 250), 
+                       breaks = seq(-100, 250, 50))
+}
+
+ggmasst <- function(df, variabel, bin, title) {
+  ggplot(df, aes(x = variabel)) +
+    geom_histogram(bins = bin, fill = "blue", alpha = 0.7) +
+    geom_histogram(data = tfordeling(df, variabel), aes(x = tvariabel), 
+                   bins = bin, fill = "red", alpha = 0.5) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    ) +
+    labs(title = title, 
+         x = "Årlig prosentvis endring", 
+         y = "Frekvens") +
+    scale_x_continuous(limits = c(-100, 250), 
+                       breaks = seq(-100, 250, 50))
+}
+
+ggdensitynorm <- function(df, variabel, bw, title) {
+  n <- nrow(df)
+  df_t <- n - 1
+  mean_val <- mean(variabel)
+  sd_val <- sd(variabel)
+  
+  x_min <- mean_val - 3 * sd_val
+  x_max <- mean_val + 4 * sd_val
+  x_vals <- seq(x_min, x_max, length.out = 1000)
+  
+  t_density <- dt((x_vals - mean_val)/sd_val, df = df_t) / sd_val * n * bw
+  t_df <- data.frame(x = x_vals, y = t_density)
+  
+  ggplot(df, aes(x = variabel)) +
+    geom_histogram(binwidth = bw, fill = "blue", 
+                   alpha = 0.7, color = "black", size = 0.2) +
+    geom_line(data = t_df, aes(x = x, y = y), 
+              color = "red", size = 1, alpha = 0.7) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5)
+    ) +
+    labs(
+      title = title,
+      x = "Årlig prosentvis endring",
+      y = "Frekvens"
+    ) +
+    scale_x_continuous(limits = c(x_min, x_max),
+                       breaks = scales::pretty_breaks(n = 10))
+}
+
+gglorenz <- function(variabel) {
+  
+  lc_lhs <- Lc(abs(variabel[variabel <= median(variabel)]))
+  lc_rhs <- Lc(variabel[variabel > median(variabel)])
+  
+  lc_lhs <- data.frame(p = lc_lhs$p, L = lc_lhs$L) %>%
+    mutate(perf_likhet = p, lorenz = 1 - p,
+           curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+  
+  lc_rhs <- data.frame(p = lc_rhs$p, L = lc_rhs$L) %>%
+    mutate(perf_likhet = p, lorenz = 1 - p)
+  
+  plot_lc_lhs <- ggplot(lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Reduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+  
+  plot_lc_rhs <- ggplot(lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Økninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+  
+  plot_lc <- grid.arrange(plot_lc_lhs, plot_lc_rhs, ncol = 2)
+  return(plot_lc)
+}
+```
+
+Hypotese 3 lyder: "Den generelle empiriske budsjettlovmessigheten holder".
+
+# Utgiftsanalyse (E)
+
+Jeg leser inn utgiftsdatasettet med post-, kapittel- og NORCAP-inndeling.
+
+```{r, utgifter}
+h3_upost_list <- list(
+  upost$gb_endring,
+  upost$bb_endring,
+  upost$gb_kpi_endring,
+  upost$bb_kpi_endring
+)
+
+h3_ukap_list <- list(
+  ukap$gb_endring,
+  ukap$bb_endring,
+  ukap$gb_kpi_endring,
+  ukap$bb_kpi_endring
+)
+
+h3_unorcap_list <- list(
+  unorcap$gb_endring,
+  unorcap$bb_endring,
+  unorcap$gb_kpi_endring,
+  unorcap$bb_kpi_endring
+)
+```
+
+## E-1 Oppsummerende deskriptiv statistikk
+
+Oppsummerende statistikk for utgifter med postinndeling:
+
+```{r, sumstat_upost}
+sumstats_upost <- summary_statistics(upost)
+#tt(sumstats_upost)
+```
+
+Oppsummerende statistikk for utgifter med kapittelinndeling:
+
+```{r, sumstat_ukap}
+sumstats_ukap <- summary_statistics(ukap)
+#tt(sumstats_ukap)
+```
+
+Oppsummerende statistikk for utgifter med NORCAP-inndeling:
+
+```{r, sumstat_unorcap}
+sumstats_unorcap <- summary_statistics(unorcap)
+#tt(sumstats_unorcap)
+```
+
+### E-1.1 Sentraltendenser
+
+Gjennomsnitt, median og modus og frekvens av modus med postinndeling:
+
+```{r, upost_sentraltendens}
+st_upost <- as.data.frame(t(sapply(h3_upost_list, sentraltendens))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(st_upost)
+```
+
+Gjennomsnitt, median og modus og frekvens av modus med postinndeling:
+
+```{r, ukap_sentraltendens}
+st_ukap <- as.data.frame(t(sapply(h3_ukap_list, sentraltendens))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(st_ukap)
+```
+
+Gjennomsnitt, median og modus og frekvens av modus med postinndeling:
+
+```{r, unorcap_sentraltendens}
+st_unorcap <- as.data.frame(t(sapply(h3_unorcap_list, sentraltendens))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(st_unorcap)
+```
+
+Gjennomsnittlig inflasjon 1999-2023.
+
+```{r, mean_KPI}
+cat("Gjennomsnittlig endring i KPI (2015 = 100)", 
+    mean((kpi$kpi_2015 / lag(kpi$kpi_2015) - 1) * 100, na.rm = TRUE), "\n")
+```
+
+Antall endringer rundt 0 prosent med brede intervaller med postinndeling:
+
+```{r, upost_nullendringer}
+cat("Antall endringer i intervallet [-0.1, 0.1], Gul bok, postinndeling, KPI-justert:", 
+    nrow(upost %>% filter(gb_kpi_endring < 0.1 & gb_kpi_endring > -0.1)), "\n")
+
+cat("Antall endringer i intervallet [-0.1, 0.1], Blå bok, postinndeling, KPI-justert:", 
+    nrow(upost %>% filter(bb_kpi_endring < 0.1 & bb_kpi_endring > -0.1)), "\n")
+```
+
+Antall endringer rundt 0 prosent med brede intervaller med kapittelinndeling:
+
+```{r, ukap_nullendringer}
+cat("Antall endringer i intervallet [-0.1, 0.1], Gul bok, kapittelinndeling, KPI-justert:", 
+    nrow(ukap %>% filter(gb_kpi_endring < 0.1 & gb_kpi_endring > -0.1)), "\n")
+cat("Antall endringer i intervallet [-0.1, 0.1], Blå bok, kapittelinndeling, KPI-justert:", 
+    nrow(ukap %>% filter(bb_kpi_endring < 0.1 & bb_kpi_endring > -0.1)), "\n")
+```
+
+Antall endringer rundt 0 prosent med brede intervaller med NORCAP-inndeling:
+
+```{r, unorcap_nullendringer}
+cat("Antall endringer i intervallet [-0.1, 0.1], Gul bok, NORCAP-inndeling, KPI-justert:", 
+    nrow(unorcap %>% filter(gb_kpi_endring < 0.1 & gb_kpi_endring > -0.1)), "\n")
+
+cat("Antall endringer i intervallet [-0.1, 0.1], Blå bok, NORCAP-inndeling, KPI-justert:", 
+    nrow(unorcap %>% filter(bb_kpi_endring < 0.1 & bb_kpi_endring > -0.1)), "\n")
+```
+
+Topp og bunn 10 for samtlige inndelinger:
+
+```{r, utgifter_ekstremverdier}
+topp_upost <- upost %>%
+  arrange(desc(gb_kpi_endring)) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+topp_ukap <- ukap %>%
+  arrange(desc(gb_kpi_endring)) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+topp_unorcap <- unorcap %>%
+  arrange(desc(gb_kpi_endring)) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+bunn_upost <- upost %>%
+  arrange(gb_kpi_endring) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+bunn_ukap <- ukap %>%
+  arrange(gb_kpi_endring) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+bunn_unorcap <- unorcap %>%
+  arrange(gb_kpi_endring) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+
+u_ekstremverdier <- data.frame(
+  "Nummer" = 1:10,
+  "Toppost" = topp_upost, "Toppkapittel" = topp_ukap, "ToppNORCAP" = topp_unorcap,
+  "Bunnpost" = bunn_upost, "Bunnkapittel" = bunn_ukap, "BunnNORCAP" = bunn_unorcap)
+
+tt(u_ekstremverdier)
+```
+
+Den kumulative tetthetsfunksjonen (CDF) til Gul bok med ulike inndelinger:
+
+```{r, utgifter_cdf_gb}
+cdf_gb <- data.frame(
+  Observasjon = c(1:length(upost$gb_kpi_endring), 
+                  1:length(ukap$gb_kpi_endring), 
+                  1:length(unorcap$gb_kpi_endring)),
+  APC = c(sort(upost$gb_kpi_endring), 
+          sort(ukap$gb_kpi_endring), 
+          sort(unorcap$gb_kpi_endring)),
+  inndeling = rep(c("Post (N = 24008)", "Kapittel (N = 7861)", "NORCAP (N = 3135)"), 
+                 times = c(length(upost$gb_kpi_endring), 
+                           length(ukap$gb_kpi_endring), 
+                           length(unorcap$gb_kpi_endring))))
+
+median_post_gb <- median(upost$gb_kpi_endring)
+median_kap_gb <- median(ukap$gb_kpi_endring)
+median_norcap_gb <- median(unorcap$gb_kpi_endring)
+```
+
+Plott av CDF med log-akser (svart er 0):
+
+```{r, utgifter_cdf_gb_log}
+plot_cdf_gb_log <- ggplot(cdf_gb, aes(x = Observasjon, y = APC, color = inndeling)) +
+  geom_line(size = 1, alpha = 0.7) +
+  scale_color_manual(
+    values = c("Post (N = 24008)" = "orange", 
+               "Kapittel (N = 7861)" = "cornflowerblue", 
+               "NORCAP (N = 3135)" = "indianred")) +
+  geom_hline(yintercept = median_post_gb, linetype = "dashed", color = "orange") +
+  geom_hline(yintercept = median_kap_gb, linetype = "dashed", color = "cornflowerblue") +
+  geom_hline(yintercept = median_norcap_gb, linetype = "dashed", color = "indianred") +
+  labs(
+       x = "Observasjoner",
+       y = "Årlig prosentvis endring (log10)",
+       color = "Inndeling") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10, color = "black")
+  ) +
+  scale_y_log10()
+
+plot_cdf_gb_log
+```
+
+Plott av CDF avkortet til ±20 (svart er 0):
+
+```{r, utgifter_cdf_gb_kort}
+plot_cdf_kort <- ggplot(cdf_gb, aes(x = Observasjon, y = APC, color = inndeling)) +
+  geom_line(size = 1, alpha = 0.7) +
+  scale_color_manual(
+    values = c("Post (N = 24008)" = "orange", 
+               "Kapittel (N = 7861)" = "cornflowerblue", 
+               "NORCAP (N = 3135)" = "indianred")) +
+  geom_hline(yintercept = median_post_gb, linetype = "dashed", color = "orange") +
+  geom_hline(yintercept = median_kap_gb, linetype = "dashed", color = "cornflowerblue") +
+  geom_hline(yintercept = median_norcap_gb, linetype = "dashed", color = "indianred") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "Observasjoner",
+    y = "Årlig prosentvis endring",
+    color = "Inndeling") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10, color = "black")
+  ) +
+  scale_y_continuous(limit = c(-20, 20), breaks = (seq(-20,20,2)))
+
+plot_cdf_kort
+```
+
+### E-1.2 Spredning
+
+Varians, SD, MAD og MADSD med postinndeling:
+
+```{r, upost_spredning}
+spr_upost <- as.data.frame(t(sapply(h3_upost_list, spredning))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(spr_upost)
+```
+
+Varians, SD, MAD og MADSD med kapittelinndeling:
+
+```{r, ukap_spredning}
+spr_ukap <- as.data.frame(t(sapply(h3_ukap_list, spredning))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(spr_ukap)
+```
+
+Varians, SD, MAD og MADSD med NORCAP-inndeling:
+
+```{r, unorcap_spredning}
+spr_unorcap <- as.data.frame(t(sapply(h3_unorcap_list, spredning))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(spr_unorcap)
+```
+
+## E-2 L-kurtose
+
+Jeg beregner L-kurtosen for samtlige inndelinger og sammenlikner med normalfordelingen.
+
+### E-2.1 Post
+
+L-kurtose av fordelingen av endringer med postinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, upost_kurtose}
+h3_upost_lkurt <- do.call(rbind, lapply(h3_upost_list, lkurt))
+
+h3_upost_lkurt <- h3_upost_lkurt %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_upost_list, length)),
+    Differanse = L_kurtose - L_kurtose_norm
+    ) %>%
+  dplyr::select(
+    Datagrunnlag, N, L_kurtose, L_kurtose_norm, Differanse
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+
+tt(h3_upost_lkurt)
+```
+
+KS-testen for Gul bok, KPI-justert:
+
+```{r, h3_upost_gb_kpi_kstest}
+kstest_h3_upost_gb <- ks.test(upost$gb_kpi_endring, "pnorm", 
+                           mean = median(upost$gb_kpi_endring), 
+                           sd = mad(upost$gb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_upost_gb$p.value, 
+    ifelse(test = kstest_h3_upost_gb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_upost_gb_kpi_kstest_plot}
+upost_gb_cdf <- data.frame(
+  x = sort(upost$gb_kpi_endring),
+  ecdf = ecdf(upost$gb_kpi_endring)(sort(upost$gb_kpi_endring))
+)
+
+upost_gb_cdf$normal_cdf <- pnorm(upost_gb_cdf$x,
+                                 mean = median(upost$gb_kpi_endring), 
+                                 sd = mad(upost$gb_kpi_endring))
+
+plot_kstest_upost_gb <- ggplot(upost_gb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "orange")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_upost_gb
+```
+
+KS-testen for Blå bok, KPI-justert:
+
+```{r, h3_upost_bb_kpi_kstest}
+kstest_h3_upost_bb <- ks.test(upost$bb_kpi_endring, "pnorm", 
+                           mean = median(upost$bb_kpi_endring), 
+                           sd = mad(upost$bb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_upost_bb$p.value, 
+    ifelse(test = kstest_h3_upost_bb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_upost_bb_kpi_kstest_plot}
+upost_bb_cdf <- data.frame(
+  x = sort(upost$bb_kpi_endring),
+  ecdf = ecdf(upost$bb_kpi_endring)(sort(upost$bb_kpi_endring))
+)
+
+upost_bb_cdf$normal_cdf <- pnorm(upost_bb_cdf$x,
+                                 mean = median(upost$bb_kpi_endring), 
+                                 sd = mad(upost$bb_kpi_endring))
+
+plot_kstest_upost_bb <- ggplot(upost_bb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "cornflowerblue")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8)
+  )
+
+
+plot_kstest_upost_bb
+```
+
+### E-2.2 Kapittel
+
+L-kurtose av fordelingen av endringer med kapittelinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, ukap_kurtose}
+h3_ukap_lkurt <- do.call(rbind, lapply(h3_ukap_list, lkurt))
+
+h3_ukap_lkurt <- h3_ukap_lkurt %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_ukap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+
+tt(h3_ukap_lkurt)
+```
+
+KS-testen for Gul bok, KPI-justert:
+
+```{r, h3_ukap_gb_kpi_kstest}
+kstest_h3_ukap_gb <- ks.test(ukap$gb_kpi_endring, "pnorm", 
+                           mean = median(ukap$gb_kpi_endring), 
+                           sd = mad(ukap$gb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_ukap_gb$p.value, 
+    ifelse(test = kstest_h3_ukap_gb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_ukap_gb_kpi_kstest_plot}
+ukap_gb_cdf <- data.frame(
+  x = sort(ukap$gb_kpi_endring),
+  ecdf = ecdf(ukap$gb_kpi_endring)(sort(ukap$gb_kpi_endring))
+)
+
+ukap_gb_cdf$normal_cdf <- pnorm(ukap_gb_cdf$x,
+                                 mean = median(ukap$gb_kpi_endring), 
+                                 sd = mad(ukap$gb_kpi_endring))
+
+plot_kstest_ukap_gb <- ggplot(ukap_gb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "orange")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_ukap_gb
+```
+
+KS-testen for Blå bok, KPI-justert:
+
+```{r, h3_ukap_bb_kpi_kstest}
+kstest_h3_ukap_bb <- ks.test(ukap$bb_kpi_endring, "pnorm", 
+                           mean = median(ukap$bb_kpi_endring), 
+                           sd = mad(ukap$bb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_ukap_bb$p.value, 
+    ifelse(test = kstest_h3_ukap_bb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_ukap_bb_kpi_kstest_plot}
+ukap_bb_cdf <- data.frame(
+  x = sort(ukap$bb_kpi_endring),
+  ecdf = ecdf(ukap$bb_kpi_endring)(sort(ukap$bb_kpi_endring))
+)
+
+ukap_bb_cdf$normal_cdf <- pnorm(ukap_bb_cdf$x,
+                                 mean = median(ukap$bb_kpi_endring), 
+                                 sd = mad(ukap$bb_kpi_endring))
+
+plot_kstest_ukap_bb <- ggplot(ukap_bb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "cornflowerblue")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_ukap_bb
+```
+
+### E-2.3 NORCAP
+
+L-kurtose av fordelingen av endringer med NORCAP-inndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, unorcap_kurtose}
+h3_unorcap_lkurt <- do.call(rbind, lapply(h3_unorcap_list, lkurt))
+
+h3_unorcap_lkurt <- h3_unorcap_lkurt %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_unorcap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+
+tt(h3_unorcap_lkurt)
+```
+
+KS-testen for Gul bok, KPI-justert:
+
+```{r, h3_unorcap_gb_kpi_kstest}
+kstest_h3_unorcap_gb <- ks.test(unorcap$gb_kpi_endring, "pnorm", 
+                           mean = median(unorcap$gb_kpi_endring), 
+                           sd = mad(unorcap$gb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_unorcap_gb$p.value, 
+    ifelse(test = kstest_h3_unorcap_gb$p.value < 0.001, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_unorcap_gb_kpi_kstest_plot}
+unorcap_gb_cdf <- data.frame(
+  x = sort(unorcap$gb_kpi_endring),
+  ecdf = ecdf(unorcap$gb_kpi_endring)(sort(unorcap$gb_kpi_endring))
+)
+
+unorcap_gb_cdf$normal_cdf <- pnorm(unorcap_gb_cdf$x,
+                                 mean = median(unorcap$gb_kpi_endring), 
+                                 sd = mad(unorcap$gb_kpi_endring))
+
+plot_kstest_unorcap_gb <- ggplot(unorcap_gb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "orange")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_unorcap_gb
+```
+
+KS-testen for Blå bok, KPI-justert:
+
+```{r, h3_unorcap_bb_kpi_kstest}
+kstest_h3_unorcap_bb <- ks.test(unorcap$bb_kpi_endring, "pnorm", 
+                           mean = median(unorcap$bb_kpi_endring), 
+                           sd = mad(unorcap$bb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_unorcap_bb$p.value, 
+    ifelse(test = kstest_h3_unorcap_bb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_unorcap_bb_kpi_kstest_plot}
+unorcap_bb_cdf <- data.frame(
+  x = sort(unorcap$bb_kpi_endring),
+  ecdf = ecdf(unorcap$bb_kpi_endring)(sort(unorcap$bb_kpi_endring))
+)
+
+unorcap_bb_cdf$normal_cdf <- pnorm(unorcap_bb_cdf$x,
+                                 mean = median(unorcap$bb_kpi_endring), 
+                                 sd = mad(unorcap$bb_kpi_endring))
+
+plot_kstest_unorcap_bb <- ggplot(unorcap_bb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "cornflowerblue")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_unorcap_bb
+```
+
+## E-3 Gini-koeffisienten
+
+Numerisk beregning av Gini-koeffisenten av en simulert standard normal $N(\mu=0,\sigma=1)$:
+
+```{r, Gini-normal}
+print(Gini(abs(rnorm(10000, mean = 0, sd = 1))))
+```
+
+### E-3.1 Post
+
+Gini-estimater av høyre og venstre side av fordelingen av endringer med postinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, upost_gini}
+h3_upost_gini <- do.call(rbind, lapply(h3_upost_list, gini))
+
+h3_upost_gini <- h3_upost_gini %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_upost_list, length)),
+    DifferanseRHS = Gini_right-Gini_right_norm,
+    DifferanseLHS = Gini_left-Gini_left_norm
+    ) %>%
+  dplyr::select(
+    Datagrunnlag, N, 
+    Gini_right, Gini_right_norm, DifferanseRHS,
+    Gini_left, Gini_left_norm, DifferanseLHS
+  ) %>%
+  rename("Gini RHS" = Gini_right,
+         "Gini LHS" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+
+tt(h3_upost_gini)
+```
+
+Jeg simulerer datasett basert på Gini-estimatene:
+
+```{r, upost_lc}
+upost_gb_lc_lhs <- Lc(abs(upost$gb_kpi_endring[upost$gb_kpi_endring <= median(upost$gb_kpi_endring)]))
+upost_bb_lc_lhs <- Lc(abs(upost$bb_kpi_endring[upost$bb_kpi_endring <= median(upost$bb_kpi_endring)]))
+upost_gb_lc_rhs <- Lc(upost$gb_kpi_endring[upost$gb_kpi_endring > median(upost$gb_kpi_endring)])
+upost_bb_lc_rhs <- Lc(upost$bb_kpi_endring[upost$bb_kpi_endring > median(upost$bb_kpi_endring)])
+
+upost_gb_lc_lhs <- data.frame(p = upost_gb_lc_lhs$p, L = upost_gb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+upost_bb_lc_lhs <- data.frame(p = upost_bb_lc_lhs$p, L = upost_bb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+upost_gb_lc_rhs <- data.frame(p = upost_gb_lc_rhs$p, L = upost_gb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+
+upost_bb_lc_rhs <- data.frame(p = upost_bb_lc_rhs$p, L = upost_bb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+```
+
+Plott av Lorenz-kurve for Gul bok med postinndeling:
+
+```{r, upost_gb_lc}
+plot_upost_gb_lc_lhs <- ggplot(upost_gb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Utgiftsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_upost_gb_lc_rhs <- ggplot(upost_gb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Utgiftsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_upost_gb_lc <- grid.arrange(plot_upost_gb_lc_lhs, plot_upost_gb_lc_rhs, ncol = 2)
+```
+
+Plott av Lorenz-kurve for Blå bok med postinndeling:
+
+```{r, upost_bb_lc}
+plot_upost_bb_lc_lhs <- ggplot(upost_bb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Utgiftsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_upost_bb_lc_rhs <- ggplot(upost_bb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Utgiftsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_upost_bb_lc <- grid.arrange(plot_upost_bb_lc_lhs, plot_upost_bb_lc_rhs, ncol = 2)
+```
+
+### E-3.2 Kapittel
+
+Gini-estimater av høyre og venstre side av fordelingen av endringer med kapittelinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, ukap_gini}
+h3_ukap_gini <- do.call(rbind, lapply(h3_ukap_list, gini))
+
+h3_ukap_gini <- h3_ukap_gini %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_ukap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, 
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Gini RHS" = Gini_right,
+         "Gini LHS" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+
+tt(h3_ukap_gini)
+```
+
+Jeg simulerer datasett basert på Gini-estimatene:
+
+```{r, ukap_lc}
+ukap_gb_lc_lhs <- Lc(abs(ukap$gb_kpi_endring[ukap$gb_kpi_endring <= median(ukap$gb_kpi_endring)]))
+ukap_bb_lc_lhs <- Lc(abs(ukap$bb_kpi_endring[ukap$bb_kpi_endring <= median(ukap$bb_kpi_endring)]))
+ukap_gb_lc_rhs <- Lc(ukap$gb_kpi_endring[ukap$gb_kpi_endring > median(ukap$gb_kpi_endring)])
+ukap_bb_lc_rhs <- Lc(ukap$bb_kpi_endring[ukap$bb_kpi_endring > median(ukap$bb_kpi_endring)])
+
+ukap_gb_lc_lhs <- data.frame(p = ukap_gb_lc_lhs$p, L = ukap_gb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+ukap_bb_lc_lhs <- data.frame(p = ukap_bb_lc_lhs$p, L = ukap_bb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+ukap_gb_lc_rhs <- data.frame(p = ukap_gb_lc_rhs$p, L = ukap_gb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+
+ukap_bb_lc_rhs <- data.frame(p = ukap_bb_lc_rhs$p, L = ukap_bb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+```
+
+Plott av Lorenz-kurve for Gul bok med kapittelinndeling:
+
+```{r, ukap_gb_lc}
+plot_ukap_gb_lc_lhs <- ggplot(ukap_gb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Utgiftsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_ukap_gb_lc_rhs <- ggplot(ukap_gb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Utgiftsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_ukap_gb_lc <- grid.arrange(plot_ukap_gb_lc_lhs, plot_ukap_gb_lc_rhs, ncol = 2)
+```
+
+Plott av Lorenz-kurve for Blå bok med kapittelinndeling:
+
+```{r, ukap_bb_lc}
+plot_ukap_bb_lc_lhs <- ggplot(ukap_bb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Utgiftsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_ukap_bb_lc_rhs <- ggplot(ukap_bb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Utgiftsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_ukap_bb_lc <- grid.arrange(plot_ukap_bb_lc_lhs, plot_ukap_bb_lc_rhs, ncol = 2)
+```
+
+### E-3.3 NORCAP
+
+Gini-estimater av høyre og venstre side av fordelingen av endringer med NORCAP-inndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, unorcap_gini}
+h3_unorcap_gini <- do.call(rbind, lapply(h3_unorcap_list, gini))
+
+h3_unorcap_gini <- h3_unorcap_gini %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_unorcap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, 
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Gini RHS" = Gini_right,
+         "Gini LHS" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+
+tt(h3_unorcap_gini)
+```
+
+Jeg simulerer datasett basert på Gini-estimatene:
+
+```{r, unorcap_lc}
+unorcap_gb_lc_lhs <- Lc(abs(unorcap$gb_kpi_endring[unorcap$gb_kpi_endring <= median(unorcap$gb_kpi_endring)]))
+unorcap_bb_lc_lhs <- Lc(abs(unorcap$bb_kpi_endring[unorcap$bb_kpi_endring <= median(unorcap$bb_kpi_endring)]))
+unorcap_gb_lc_rhs <- Lc(unorcap$gb_kpi_endring[unorcap$gb_kpi_endring > median(unorcap$gb_kpi_endring)])
+unorcap_bb_lc_rhs <- Lc(unorcap$bb_kpi_endring[unorcap$bb_kpi_endring > median(unorcap$bb_kpi_endring)])
+
+unorcap_gb_lc_lhs <- data.frame(p = unorcap_gb_lc_lhs$p, L = unorcap_gb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+unorcap_bb_lc_lhs <- data.frame(p = unorcap_bb_lc_lhs$p, L = unorcap_bb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+unorcap_gb_lc_rhs <- data.frame(p = unorcap_gb_lc_rhs$p, L = unorcap_gb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+
+unorcap_bb_lc_rhs <- data.frame(p = unorcap_bb_lc_rhs$p, L = unorcap_bb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+```
+
+Plott av Lorenz-kurve for Gul bok med NORCAP-inndeling:
+
+```{r, unorcap_gb_lc}
+plot_unorcap_gb_lc_lhs <- ggplot(unorcap_gb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Utgiftsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_unorcap_gb_lc_rhs <- ggplot(unorcap_gb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Utgiftsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_unorcap_gb_lc <- grid.arrange(plot_unorcap_gb_lc_lhs, plot_unorcap_gb_lc_rhs, ncol = 2)
+```
+
+Plott av Lorenz-kurve for Blå bok med NORCAP-inndeling:
+
+```{r, unorcap_bb_lc}
+plot_unorcap_bb_lc_lhs <- ggplot(unorcap_bb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Utgiftsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_unorcap_bb_lc_rhs <- ggplot(unorcap_bb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Utgiftsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_unorcap_bb_lc <- grid.arrange(plot_unorcap_bb_lc_lhs, plot_unorcap_bb_lc_rhs, ncol = 2)
+```
+
+#### Hypotesetest H3
+
+```{r, bootstrap}
+split_df <- function(df1, df2, variabel) {
+  
+  median1 <- median(df1[[variabel]])
+  lhs1 <- df1[df1[[variabel]] < median1, ]
+  rhs1 <- df1[df1[[variabel]] >= median1, ]
+  lhs1 <- abs(lhs1[[variabel]])
+  rhs1 <- rhs1[[variabel]]
+  
+  median2 <- median(df2[[variabel]])
+  lhs2 <- df2[df2[[variabel]] < median2, ]
+  rhs2 <- df2[df2[[variabel]] >= median2, ]
+  lhs2 <- abs(lhs2[[variabel]])
+  rhs2 <- rhs2[[variabel]]
+  
+  return(list(lhs1 = lhs1, rhs1 = rhs1,
+              lhs2 = lhs2, rhs2 = rhs2))
+}
+
+gini_diff <- function(x, y) {
+  G1 <- ineq::Gini(x)
+  G2 <- ineq::Gini(y)
+  return(G1 - G2)
+}
+
+bootstrap_gini_test <- function(x, y, B = 10000, seed = 123) {
+  set.seed(seed)
+  
+  n_x <- length(x)
+  n_y <- length(y)
+  combined <- c(x, y)
+  
+  observed_diff <- gini_diff(x, y)
+  
+  boot_diffs <- replicate(B, {
+    resample <- sample(combined, size = n_x + n_y, replace = TRUE)
+    x_star <- resample[1:n_x]
+    y_star <- resample[(n_x+1):(n_x + n_y)]
+    gini_diff(x_star, y_star)
+  })
+  
+  p_val <- mean(abs(boot_diffs) >= abs(observed_diff))
+  
+  return(list(
+    observed_difference = observed_diff,
+    p_value = p_val,
+    bootstrap_distribution = boot_diffs
+  ))
+}
+
+normf <- function(df, variabel1, variabel2) {
+  set.seed(123)
+  data.frame(
+  gb_kpi_endring = rnorm(nrow(df), 
+                         median(df[[variabel1]]),
+                         mad(df[[variabel1]])),
+  bb_kpi_endring = rnorm(nrow(df), 
+                         median(df[[variabel2]]),
+                         mad(df[[variabel2]])))
+}
+```
+
+Hypotesetest av H3:
+
+```{r, bstest_h3}
+upost_norm <- normf(upost, "gb_kpi_endring", "bb_kpi_endring")
+h3_upost_split <- split_df(upost, upost_norm, "gb_kpi_endring")
+
+Gini(h3_upost_split$rhs1) -
+Gini(h3_upost_split$rhs2) # Omvendt test
+bstest_h3_gb_rhs <- bootstrap_gini_test(h3_upost_split$rhs2, h3_upost_split$rhs1)
+
+Gini(h3_upost_split$lhs1) -
+Gini(h3_upost_split$lhs2) # Omvendt test
+bstest_h3_gb_lhs <- bootstrap_gini_test(h3_upost_split$lhs2, h3_upost_split$lhs1)
+
+h3_upost_split <- split_df(upost, upost_norm, "bb_kpi_endring")
+
+Gini(h3_upost_split$rhs1) -
+Gini(h3_upost_split$rhs2) # Omvendt test
+bstest_h3_bb_rhs <- bootstrap_gini_test(h3_upost_split$rhs2, h3_upost_split$rhs1)
+
+
+Gini(h3_upost_split$lhs1) -
+Gini(h3_upost_split$lhs2) # Omvendt test
+bstest_h3_bb_lhs <- bootstrap_gini_test(h3_upost_split$lhs2, h3_upost_split$lhs1)
+```
+
+Oversikt:
+
+```{r, bstest_results}
+
+signif <- function(p) {
+  ifelse(p <= 0.001, "***", 
+       ifelse(p <= 0.01, "**", 
+              ifelse(p <= 0.05, "*", 
+                     ifelse(p <= 0.1, ".", ""))))
+}
+
+bstest_results <- data.frame(
+  Hypotese = c("H3", "H3"),
+  Påstand = c("G(x) > G(N)", "G(x) > G(N)"),
+  Dokument = c("Budsjettforslag", "Budsjettvedtak"),
+  P_lhs = c(bstest_h3_gb_lhs$p_value,
+            bstest_h3_bb_lhs$p_value),
+  Sign_lhs = c(signif(bstest_h3_gb_lhs$p_value),
+               signif(bstest_h3_bb_lhs$p_value)),
+  P_rhs = c(bstest_h3_gb_rhs$p_value,
+            bstest_h3_bb_rhs$p_value),
+  Sign_rhs = c(signif(bstest_h3_gb_rhs$p_value),
+               signif(bstest_h3_bb_rhs$p_value)))
+tt(bstest_results)
+```
+
+### E-4 Budsjettfordelinger
+
+Jeg plotter budsjettfordelingene for Gul bok og Blå bok, i løpende og KPI-justerte priser.
+
+Oppsummeringsplott:
+
+```{r, oppsummeringsplott}
+samlet <- data.frame(
+  value = c(upost$gb_kpi_endring, upost$bb_kpi_endring, 
+            ipost$gb_kpi_endring, ipost$bb_kpi_endring),
+  variable = c(rep("upost_gb_kpi_endring", nrow(upost)), 
+               rep("upost_bb_kpi_endring", nrow(upost)),
+               rep("ipost_gb_kpi_endring", nrow(ipost)), 
+               rep("ipost_bb_kpi_endring", 
+               nrow(ipost)))
+)
+
+samlet$variable <- factor(
+  samlet$variable,
+  levels = c("upost_gb_kpi_endring", "upost_bb_kpi_endring", 
+             "ipost_gb_kpi_endring", "ipost_bb_kpi_endring"),
+  labels = c("(1) Utgifter, budsjettforslag",
+             "(2) Utgifter, budsjettvedtak",
+             "(3) Inntekter, budsjettforslag",
+             "(4) Inntekter, budsjettvedtak")
+)
+
+plot_samlet <- ggplot(samlet, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Oversikt over budsjettfordelinger", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100))
+
+plot_samlet
+```
+
+### E-4.1 Postfordelinger
+
+Plott av Gul bok for postinndeling:
+
+```{r, upost_GB}
+plot_upost_gb <- ggmass(upost, upost$gb_endring, 100, "Utgifter i budsjettforslag")
+
+plot_upost_gb
+```
+
+Plott av Gul bok og T-fordeling for postinndeling:
+
+```{r, upost_GB_medT}
+plot_upost_gb_gg1 <- ggdensityt(upost, 
+                              upost$gb_endring, 
+                              2, 
+                              "Utgifter i Gul bok")
+
+plot_upost_gb_gg2 <- ggdensitynorm(upost, 
+                              upost$gb_endring, 
+                              100, 
+                              "Utgifter i Gul bok")
+
+plot_upost_gb_gg3 <- ggmasst(upost, 
+                              upost$gb_endring, 
+                              100, 
+                              "Utgifter i Gul bok")
+plot_upost_gb_gg1
+plot_upost_gb_gg2
+plot_upost_gb_gg3
+```
+
+Plott av Blå bok for postinndeling:
+
+```{r, upost_BB}
+plot_upost_bb <- ggmass(
+  upost, 
+  upost$bb_endring,
+  100,
+  "Utgifter i budsjettvedtak")
+
+plot_upost_bb
+```
+
+Plott av Blå bok og T-fordeling for postinndeling:
+
+```{r, upost_BB_medT}
+plot_upost_bb_gg1 <- ggdensityt(upost, 
+                              upost$bb_endring, 
+                              2, 
+                              "Utgifter i Gul bok")
+
+plot_upost_bb_gg2 <- ggdensitynorm(upost, 
+                              upost$bb_endring, 
+                              100, 
+                              "Utgifter i Gul bok")
+
+plot_upost_bb_gg3 <- ggmasst(upost, 
+                              upost$bb_endring, 
+                              100, 
+                              "Utgifter i Gul bok")
+plot_upost_bb_gg1
+plot_upost_bb_gg2
+plot_upost_bb_gg3
+```
+
+Plott av KPI-justert Gul bok for postinndeling:
+
+```{r, upost_GB-KPI}
+plot_upost_gb_kpi <- ggmass(
+  upost, 
+  upost$gb_kpi_endring,
+  100,
+  "Utgifter i budsjettforslag, inflasjonsjustert")
+
+plot_upost_gb_kpi
+```
+
+Plott av KPI-justert Gul bok og T-fordeling for postinndeling:
+
+```{r, upost_GB-KPI_medT}
+plot_upost_gb_kpi_gg1 <- ggdensityt(upost, 
+                              upost$gb_kpi_endring, 
+                              2, 
+                              "Utgifter i Gul bok")
+
+plot_upost_gb_kpi_gg2 <- ggdensitynorm(upost, 
+                              upost$gb_kpi_endring, 
+                              50, 
+                              "Utgifter i Gul bok")
+
+plot_upost_gb_kpi_gg3 <- ggmasst(upost, 
+                              upost$gb_kpi_endring, 
+                              100, 
+                              "Utgifter,")
+plot_upost_gb_kpi_gg1
+plot_upost_gb_kpi_gg2
+plot_upost_gb_kpi_gg3
+```
+
+Plott av KPI-justert Blå bok for postinndeling:
+
+```{r, upost_BB-KPI}
+plot_upost_bb_kpi <- ggmass(
+  upost, 
+  upost$bb_kpi_endring,
+  100,
+  "Utgifter i budsjettvedtak, inflasjonsjustert")
+
+plot_upost_bb_kpi
+```
+
+Plott av KPI-justert Blå bok og T-fordeling for postinndeling:
+
+```{r, upost_BB-KPI_medT}
+plot_upost_bb_kpi_t <- ggplot(upost, aes(x = bb_kpi_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 250, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(upost$bb_kpi_endring)) / mad(upost$bb_kpi_endring), 
+       df = length(upost$bb_kpi_endring)) / mad(upost$bb_kpi_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_upost_bb_kpi_t
+```
+
+Jeg pivoterer dataene til langt format:
+
+```{r, upost_pivot_transformert}
+upost_pivot <- upost %>%
+  pivot_longer(cols = c(gb_endring,bb_endring,gb_kpi_endring,bb_kpi_endring), 
+               names_to = "variable", values_to = "value")
+```
+
+Plott av samtlige fordelinger, uavkortet:
+
+```{r, upost_samlet_fullstendig}
+plot_upost_pivot <- ggplot(upost_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter", x = "Årlig prosentvis endring", y = "Frekvens")
+
+plot_upost_pivot
+```
+
+Plott av samtlige fordelinger, avkortet:
+
+```{r, upost_samlet_avkortet}
+plot_upost_pivot_kort <- ggplot(upost_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100)) +
+  scale_y_continuous(limits = c(0, 9000))
+
+plot_upost_pivot_kort
+```
+
+### E-4.2 Kapittelfordelinger
+
+Plott av Gul bok for kapittelinndeling:
+
+```{r, ukap_GB}
+plot_ukap_gb <- ggplot(ukap, aes(x = gb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ukap_gb
+```
+
+Plott av Gul bok og T-fordeling for kapittelinndeling:
+
+```{r, ukap_GB_medT}
+plot_ukap_gb_t <- ggplot(ukap, aes(x = gb_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 250, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(ukap$gb_endring)) / mad(ukap$gb_endring), 
+       df = length(ukap$gb_endring)) / mad(ukap$gb_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ukap_gb_t
+```
+
+Plott av Blå bok for kapittelinndeling:
+
+```{r, ukap_BB}
+plot_ukap_bb <- ggplot(ukap, aes(x = bb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+
+  ) +
+  labs(title = "Utgifter i Blå bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ukap_bb
+```
+
+Plott av Blå bok og T-fordeling for kapittelinndeling:
+
+```{r, ukap_BB_medT}
+plot_ukap_bb_t <- ggplot(ukap, aes(x = bb_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 250, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(ukap$bb_endring)) / mad(ukap$bb_endring), 
+       df = length(ukap$bb_endring)) / mad(ukap$bb_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ukap_bb_t
+```
+
+Plott av KPI-justert Gul bok for kapittelinndeling:
+
+```{r, ukap_GB-KPI}
+plot_ukap_gb_kpi <- ggplot(ukap, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ukap_gb_kpi
+```
+
+Plott av KPI-justert Gul bok og T-fordeling for kapittelinndeling:
+
+```{r, ukap_GB-KPI_medT}
+plot_ukap_gb_kpi_t <- ggplot(ukap, aes(x = gb_kpi_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 250, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(ukap$gb_kpi_endring)) / mad(ukap$gb_kpi_endring), 
+       df = length(ukap$gb_kpi_endring)) / mad(ukap$gb_kpi_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ukap_gb_kpi_t
+```
+
+Plott av KPI-justert Blå bok for kapittelinndeling:
+
+```{r, ukap_BB-KPI}
+plot_ukap_bb_kpi <- ggplot(ukap, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ukap_bb_kpi
+```
+
+Plott av KPI-justert Blå bok og T-fordeling for kapittelinndeling:
+
+```{r, ukap_BB-KPI_medT}
+plot_ukap_bb_kpi_t <- ggplot(ukap, aes(x = bb_kpi_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 250, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(ukap$gb_kpi_endring)) / mad(ukap$gb_kpi_endring), 
+       df = length(ukap$gb_kpi_endring)) / mad(ukap$gb_kpi_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ukap_bb_kpi_t
+```
+
+Jeg pivoterer dataene til langt format:
+
+```{r, ukap_pivot_transformert}
+ukap_pivot <- ukap %>%
+  pivot_longer(cols = c(gb_endring,bb_endring,gb_kpi_endring,bb_kpi_endring), 
+               names_to = "variable", values_to = "value")
+```
+
+Plott av samtlige fordelinger, uavkortet:
+
+```{r, ukap_samlet_fullstendig}
+plot_ukap_pivot <- ggplot(ukap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter", x = "Årlig prosentvis endring", y = "Frekvens")
+
+plot_ukap_pivot
+```
+
+Plott av samtlige fordelinger, avkortet:
+
+```{r, ukap_samlet_avkortet}
+plot_ukap_pivot_kort <- ggplot(ukap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100)) +
+  scale_y_continuous(limits = c(0, 2500))
+
+plot_ukap_pivot_kort
+```
+
+### E-4.3 NORCAP-fordelinger
+
+Plott av Gul bok for NORCAP-inndeling:
+
+```{r, unorcap_GB}
+plot_unorcap_gb <- ggplot(unorcap, aes(x = gb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_unorcap_gb
+```
+
+Plott av Gul bok og T-fordeling for NORCAP-inndeling:
+
+```{r, unorcap_GB_medT}
+plot_unorcap_gb_t <- ggplot(unorcap, aes(x = gb_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 200, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(unorcap$gb_endring)) / mad(unorcap$gb_endring), 
+       df = length(unorcap$gb_endring)) / mad(unorcap$gb_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_unorcap_gb_t
+```
+
+Plott av Blå bok for NORCAP-inndeling:
+
+```{r, unorcap_BB}
+plot_unorcap_bb <- ggplot(unorcap, aes(x = bb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+
+  ) +
+  labs(title = "Utgifter i Blå bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_unorcap_bb
+```
+
+Plott av Blå bok og T-fordeling for NORCAP-inndeling:
+
+```{r, unorcap_BB_medT}
+plot_unorcap_bb_t <- ggplot(unorcap, aes(x = bb_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 200, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(unorcap$bb_endring)) / mad(unorcap$bb_endring), 
+       df = length(unorcap$bb_endring)) / mad(unorcap$bb_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_unorcap_bb_t
+```
+
+Plott av KPI-justert Gul bok for NORCAP-inndeling:
+
+```{r, unorcap_GB-KPI}
+plot_unorcap_gb_kpi <- ggplot(unorcap, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_unorcap_gb_kpi
+```
+
+Plott av KPI-justert Gul bok og T-fordeling for NORCAP-inndeling:
+
+```{r, unorcap_GB-KPI_medT}
+plot_unorcap_gb_kpi_t <- ggplot(unorcap, aes(x = gb_kpi_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 200, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(unorcap$gb_kpi_endring)) / mad(unorcap$gb_kpi_endring), 
+       df = length(unorcap$gb_kpi_endring)) / mad(unorcap$gb_kpi_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_unorcap_gb_kpi_t
+```
+
+Plott av KPI-justert Blå bok for NORCAP-inndeling:
+
+```{r, unorcap_BB-KPI}
+plot_unorcap_bb_kpi <- ggplot(unorcap, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_unorcap_bb_kpi
+```
+
+Plott av KPI-justert Blå bok og T-fordeling for NORCAP-inndeling:
+
+```{r, unorcap_BB-KPI_medT}
+plot_unorcap_bb_kpi_t <- ggplot(unorcap, aes(x = bb_kpi_endring)) +
+  geom_histogram(aes(y = ..density..), bins = 200, fill = "blue", alpha = 0.7) +
+  stat_function(fun = function(x) {
+    dt((x - median(unorcap$bb_kpi_endring)) / mad(unorcap$bb_kpi_endring), 
+       df = length(unorcap$bb_kpi_endring)) / mad(unorcap$bb_kpi_endring)
+  }, color = "red", size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_unorcap_bb_kpi_t
+```
+
+Jeg pivoterer dataene til langt format:
+
+```{r, unorcap_pivot_transformert}
+unorcap_pivot <- unorcap %>%
+  pivot_longer(cols = c(gb_endring,bb_endring,gb_kpi_endring,bb_kpi_endring), 
+               names_to = "variable", values_to = "value")
+```
+
+Plott av samtlige fordelinger, uavkortet:
+
+```{r, unorcap_samlet_fullstendig}
+plot_unorcap_pivot <- ggplot(unorcap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter", x = "Årlig prosentvis endring", y = "Frekvens")
+
+plot_unorcap_pivot
+```
+
+Plott av samtlige fordelinger, avkortet:
+
+```{r, unorcap_samlet_avkortet}
+plot_unorcap_pivot_kort <- ggplot(unorcap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Utgifter", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100)) +
+  scale_y_continuous(limits = c(0, 1000))
+
+plot_unorcap_pivot_kort
+```
+
+# Inntektsanalyse (R)
+
+Jeg leser inn inntektsdatasettet med post-, kapittel- og NORCAP-inndeling.
+
+```{r, inntekter}
+h3_ipost_list <- list(
+  ipost$gb_endring,
+  ipost$bb_endring,
+  ipost$gb_kpi_endring,
+  ipost$bb_kpi_endring
+)
+
+h3_ikap_list <- list(
+  ikap$gb_endring,
+  ikap$bb_endring,
+  ikap$gb_kpi_endring,
+  ikap$bb_kpi_endring
+)
+
+h3_inorcap_list <- list(
+  inorcap$gb_endring,
+  inorcap$bb_endring,
+  inorcap$gb_kpi_endring,
+  inorcap$bb_kpi_endring
+)
+```
+
+## R-1 Oppsummerende deskriptiv statistikk
+
+Oppsummerende statistikk for inntekter med postinndeling:
+
+```{r, sumstat_ipost}
+sumstats_ipost <- summary_statistics(ipost)
+#tt(sumstats_ipost)
+```
+
+Oppsummerende statistikk for inntekter med kapittelinndeling:
+
+```{r, sumstat_ikap}
+sumstats_ikap <- summary_statistics(ikap)
+#tt(sumstats_ikap)
+```
+
+Oppsummerende statistikk for inntekter med NORCAP-inndeling:
+
+```{r, sumstat_inorcap}
+sumstats_inorcap <- summary_statistics(inorcap)
+#tt(sumstats_inorcap)
+```
+
+### R-1.1 Sentraltendenser
+
+Gjennomsnitt, median og modus og frekvens av modus med postinndeling:
+
+```{r, ipost_sentraltendens}
+st_ipost <- as.data.frame(t(sapply(h3_ipost_list, sentraltendens))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(st_ipost)
+```
+
+Gjennomsnitt, median og modus og frekvens av modus med postinndeling:
+
+```{r, ikap_sentraltendens}
+st_ikap <- as.data.frame(t(sapply(h3_ikap_list, sentraltendens))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(st_ikap)
+```
+
+Gjennomsnitt, median og modus og frekvens av modus med postinndeling:
+
+```{r, inorcap_sentraltendens}
+st_inorcap <- as.data.frame(t(sapply(h3_inorcap_list, sentraltendens))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(st_inorcap)
+```
+
+Antall endringer rundt 0 prosent med brede intervaller med postinndeling:
+
+```{r, ipost_nullendringer}
+cat("Antall endringer i intervallet [-0.1, 0.1], Gul bok, postinndeling, KPI-justert:", 
+    nrow(ipost %>% filter(gb_kpi_endring < 0.1 & gb_kpi_endring > -0.1)), "\n")
+
+cat("Antall endringer i intervallet [-0.1, 0.1], Blå bok, postinndeling, KPI-justert:", 
+    nrow(ipost %>% filter(bb_kpi_endring < 0.1 & bb_kpi_endring > -0.1)), "\n")
+```
+
+Antall endringer rundt 0 prosent med brede intervaller med kapittelinndeling:
+
+```{r, ikap_nullendringer}
+cat("Antall endringer i intervallet [-0.1, 0.1], Gul bok, kapittelinndeling, KPI-justert:", 
+    nrow(ikap %>% filter(gb_kpi_endring < 0.1 & gb_kpi_endring > -0.1)), "\n")
+cat("Antall endringer i intervallet [-0.1, 0.1], Blå bok, kapittelinndeling, KPI-justert:", 
+    nrow(ikap %>% filter(bb_kpi_endring < 0.1 & bb_kpi_endring > -0.1)), "\n")
+```
+
+Antall endringer rundt 0 prosent med brede intervaller med NORCAP-inndeling:
+
+```{r, inorcap_nullendringer}
+cat("Antall endringer i intervallet [-0.1, 0.1], Gul bok, postinndeling, KPI-justert:", 
+    nrow(inorcap %>% filter(gb_kpi_endring < 0.1 & gb_kpi_endring > -0.1)), "\n")
+
+cat("Antall endringer i intervallet [-0.1, 0.1], Blå bok, postinndeling, KPI-justert:", 
+    nrow(inorcap %>% filter(bb_kpi_endring < 0.1 & bb_kpi_endring > -0.1)), "\n")
+```
+
+Topp og bunn 10 for samtlige inndelinger:
+
+```{r, inntekter_ekstremverdier}
+topp_ipost <- ipost %>%
+  arrange(desc(gb_kpi_endring)) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+topp_ikap <- ikap %>%
+  arrange(desc(gb_kpi_endring)) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+topp_inorcap <- inorcap %>%
+  arrange(desc(gb_kpi_endring)) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+bunn_ipost <- ipost %>%
+  arrange(gb_kpi_endring) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+bunn_ikap <- ikap %>%
+  arrange(gb_kpi_endring) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+bunn_inorcap <- inorcap %>%
+  arrange(gb_kpi_endring) %>%
+  slice_head(n = 10) %>%
+  pull(gb_kpi_endring)
+
+i_ekstremverdier <- data.frame(
+  "Nummer" = 1:10,
+  "Topppost" = topp_ipost, "Toppkapittel" = topp_ikap, "ToppNORCAP" = topp_inorcap,
+  "Bunnpost" = bunn_ipost, "Bunnkapittel" = bunn_ikap, "BunnNORCAP" = bunn_inorcap)
+
+tt(i_ekstremverdier)
+```
+
+Den kumulative tetthetsfunksjonen (CDF) til Gul bok med ulike inndelinger:
+
+```{r, inntekter_cdf_gb}
+cdf_gb <- data.frame(
+  Observasjon = c(1:length(ipost$gb_kpi_endring), 
+                  1:length(ikap$gb_kpi_endring), 
+                  1:length(inorcap$gb_kpi_endring)),
+  APC = c(sort(ipost$gb_kpi_endring), 
+          sort(ikap$gb_kpi_endring), 
+          sort(inorcap$gb_kpi_endring)),
+  inndeling = rep(c("Post (N = 24008)", "Kapittel (N = 7861)", "NORCAP (N = 3135)"), 
+                 times = c(length(ipost$gb_kpi_endring), 
+                           length(ikap$gb_kpi_endring), 
+                           length(inorcap$gb_kpi_endring))))
+
+median_post_gb <- median(ipost$gb_kpi_endring)
+median_kap_gb <- median(ikap$gb_kpi_endring)
+median_norcap_gb <- median(inorcap$gb_kpi_endring)
+```
+
+Plott av CDF med log-akser (svart er 0):
+
+```{r, inntekter_cdf_gb_log}
+plot_cdf_gb_log <- ggplot(cdf_gb, aes(x = Observasjon, y = APC, color = inndeling)) +
+  geom_line(size = 1, alpha = 0.7) +
+  scale_color_manual(
+    values = c("Post (N = 24008)" = "orange", 
+               "Kapittel (N = 7861)" = "cornflowerblue", 
+               "NORCAP (N = 3135)" = "indianred")) +
+  geom_hline(yintercept = median_post_gb, linetype = "dashed", color = "orange") +
+  geom_hline(yintercept = median_kap_gb, linetype = "dashed", color = "cornflowerblue") +
+  geom_hline(yintercept = median_norcap_gb, linetype = "dashed", color = "indianred") +
+  labs(
+       x = "Observasjoner",
+       y = "Årlig prosentvis endring (log10)",
+       color = "Inndeling") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10, color = "black")
+  ) +
+  scale_y_log10(breaks = c(1, 5, 10, 50, 100))
+
+plot_cdf_gb_log
+```
+
+Plott av CDF avkortet til ±20 (svart er 0):
+
+```{r, inntekter_cdf_gb_kort}
+plot_cdf_kort <- ggplot(cdf_gb, aes(x = Observasjon, y = APC, color = inndeling)) +
+  geom_line(size = 1, alpha = 0.7) +
+  scale_color_manual(
+    values = c("Post (N = 24008)" = "orange", 
+               "Kapittel (N = 7861)" = "cornflowerblue", 
+               "NORCAP (N = 3135)" = "indianred")) +
+  geom_hline(yintercept = median_post_gb, linetype = "dashed", color = "orange") +
+  geom_hline(yintercept = median_kap_gb, linetype = "dashed", color = "cornflowerblue") +
+  geom_hline(yintercept = median_norcap_gb, linetype = "dashed", color = "indianred") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "Observasjoner",
+    y = "Årlig prosentvis endring",
+    color = "Inndeling") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10, color = "black")
+  ) +
+  scale_y_continuous(limit = c(-20, 20), breaks = (seq(-20,20,2)))
+
+plot_cdf_kort
+```
+
+### R-1.2 Spredning
+
+Varians, SD, MAD og MADSD med postinndeling:
+
+```{r, ipost_spredning}
+spr_ipost <- as.data.frame(t(sapply(h3_ipost_list, spredning))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(spr_ipost)
+```
+
+Varians, SD, MAD og MADSD med kapittelinndeling:
+
+```{r, ikap_spredning}
+spr_ikap <- as.data.frame(t(sapply(h3_ikap_list, spredning))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(spr_ikap)
+```
+
+Varians, SD, MAD og MADSD med NORCAP-inndeling:
+
+```{r, inorcap_spredning}
+spr_inorcap <- as.data.frame(t(sapply(h3_inorcap_list, spredning))) %>%
+  mutate(Datagrunnlag = h3_navn) %>%
+  dplyr::select(Datagrunnlag, !Datagrunnlag)
+
+tt(spr_inorcap)
+```
+
+## R-2 L-kurtose
+
+Jeg beregner L-kurtosen for samtlige inndelinger og sammenlikner med normalfordelingen.
+
+### R-2.1 Post
+
+L-kurtose av fordelingen av endringer med postinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, ipost_kurtose}
+h3_ipost_lkurt <- do.call(rbind, lapply(h3_ipost_list, lkurt))
+
+h3_ipost_lkurt <- h3_ipost_lkurt %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_ipost_list, length)),
+    Differanse = L_kurtose - L_kurtose_norm
+    ) %>%
+  dplyr::select(
+    Datagrunnlag, N, L_kurtose, L_kurtose_norm, Differanse
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+
+tt(h3_ipost_lkurt)
+```
+
+KS-testen for Gul bok, KPI-justert:
+
+```{r, h3_ipost_gb_kpi_kstest}
+kstest_h3_ipost_gb <- ks.test(ipost$gb_kpi_endring, "pnorm", 
+                           mean = median(ipost$gb_kpi_endring), 
+                           sd = mad(ipost$gb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_ipost_gb$p.value, 
+    ifelse(test = kstest_h3_ipost_gb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_ipost_gb_kpi_kstest_plot}
+ipost_gb_cdf <- data.frame(
+  x = sort(ipost$gb_kpi_endring),
+  ecdf = ecdf(ipost$gb_kpi_endring)(sort(ipost$gb_kpi_endring))
+)
+
+ipost_gb_cdf$normal_cdf <- pnorm(ipost_gb_cdf$x,
+                                 mean = median(ipost$gb_kpi_endring), 
+                                 sd = mad(ipost$gb_kpi_endring))
+
+plot_kstest_ipost_gb <- ggplot(ipost_gb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "orange")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_ipost_gb
+```
+
+KS-testen for Blå bok, KPI-justert:
+
+```{r, h3_ipost_bb_kpi_kstest}
+kstest_h3_ipost_bb <- ks.test(ipost$bb_kpi_endring, "pnorm", 
+                           mean = median(ipost$bb_kpi_endring), 
+                           sd = mad(ipost$bb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_ipost_bb$p.value, 
+    ifelse(test = kstest_h3_ipost_bb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_ipost_bb_kpi_kstest_plot}
+ipost_bb_cdf <- data.frame(
+  x = sort(ipost$bb_kpi_endring),
+  ecdf = ecdf(ipost$bb_kpi_endring)(sort(ipost$bb_kpi_endring))
+)
+
+ipost_bb_cdf$normal_cdf <- pnorm(ipost_bb_cdf$x,
+                                 mean = median(ipost$bb_kpi_endring), 
+                                 sd = mad(ipost$bb_kpi_endring))
+
+plot_kstest_ipost_bb <- ggplot(ipost_bb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "cornflowerblue")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_ipost_bb
+```
+
+### R-2.2 Kapittel
+
+L-kurtose av fordelingen av endringer med kapittelinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, ikap_kurtose}
+h3_ikap_lkurt <- do.call(rbind, lapply(h3_ikap_list, lkurt))
+
+h3_ikap_lkurt <- h3_ikap_lkurt %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_ikap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+
+tt(h3_ikap_lkurt)
+```
+
+KS-testen for Gul bok, KPI-justert:
+
+```{r, h3_ikap_gb_kpi_kstest}
+kstest_h3_ikap_gb <- ks.test(ikap$gb_kpi_endring, "pnorm", 
+                           mean = median(ikap$gb_kpi_endring), 
+                           sd = mad(ikap$gb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_ikap_gb$p.value, 
+    ifelse(test = kstest_h3_ikap_gb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_ikap_gb_kpi_kstest_plot}
+ikap_gb_cdf <- data.frame(
+  x = sort(ikap$gb_kpi_endring),
+  ecdf = ecdf(ikap$gb_kpi_endring)(sort(ikap$gb_kpi_endring))
+)
+
+ikap_gb_cdf$normal_cdf <- pnorm(ikap_gb_cdf$x,
+                                 mean = median(ikap$gb_kpi_endring), 
+                                 sd = mad(ikap$gb_kpi_endring))
+
+plot_kstest_ikap_gb <- ggplot(ikap_gb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "orange")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_ikap_gb
+```
+
+KS-testen for Blå bok, KPI-justert:
+
+```{r, h3_ikap_bb_kpi_kstest}
+kstest_h3_ikap_bb <- ks.test(ikap$bb_kpi_endring, "pnorm", 
+                           mean = median(ikap$bb_kpi_endring), 
+                           sd = mad(ikap$bb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_ikap_bb$p.value, 
+    ifelse(test = kstest_h3_ikap_bb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_ikap_bb_kpi_kstest_plot}
+ikap_bb_cdf <- data.frame(
+  x = sort(ikap$bb_kpi_endring),
+  ecdf = ecdf(ikap$bb_kpi_endring)(sort(ikap$bb_kpi_endring))
+)
+
+ikap_bb_cdf$normal_cdf <- pnorm(ikap_bb_cdf$x,
+                                 mean = median(ikap$bb_kpi_endring), 
+                                 sd = mad(ikap$bb_kpi_endring))
+
+plot_kstest_ikap_bb <- ggplot(ikap_bb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "cornflowerblue")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_ikap_bb
+```
+
+### R-2.3 NORCAP
+
+L-kurtose av fordelingen av endringer med NORCAP-inndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, inorcap_kurtose}
+h3_inorcap_lkurt <- do.call(rbind, lapply(h3_inorcap_list, lkurt))
+
+h3_inorcap_lkurt <- h3_inorcap_lkurt %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_inorcap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, L_kurtose, L_kurtose_norm
+  ) %>%
+  rename("L-kurtose" = L_kurtose,
+         "L-kurtose (normal)" = L_kurtose_norm)
+
+tt(h3_inorcap_lkurt)
+```
+
+KS-testen for Gul bok, KPI-justert:
+
+```{r, h3_inorcap_gb_kpi_kstest}
+kstest_h3_inorcap_gb <- ks.test(inorcap$gb_kpi_endring, "pnorm", 
+                           mean = median(inorcap$gb_kpi_endring), 
+                           sd = mad(inorcap$gb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_inorcap_gb$p.value, 
+    ifelse(test = kstest_h3_inorcap_gb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_inorcap_gb_kpi_kstest_plot}
+inorcap_gb_cdf <- data.frame(
+  x = sort(inorcap$gb_kpi_endring),
+  ecdf = ecdf(inorcap$gb_kpi_endring)(sort(inorcap$gb_kpi_endring))
+)
+
+inorcap_gb_cdf$normal_cdf <- pnorm(inorcap_gb_cdf$x,
+                                 mean = median(inorcap$gb_kpi_endring), 
+                                 sd = mad(inorcap$gb_kpi_endring))
+
+plot_kstest_inorcap_gb <- ggplot(inorcap_gb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "orange")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_inorcap_gb
+```
+
+KS-testen for Blå bok, KPI-justert:
+
+```{r, h3_inorcap_bb_kpi_kstest}
+kstest_h3_inorcap_bb <- ks.test(inorcap$bb_kpi_endring, "pnorm", 
+                           mean = median(inorcap$bb_kpi_endring), 
+                           sd = mad(inorcap$bb_kpi_endring))
+
+cat("P-verdi:", kstest_h3_inorcap_bb$p.value, 
+    ifelse(test = kstest_h3_inorcap_bb$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+Plott av den kumulative budsjettfordelingen sammenliknet den kumulative normalfordelingen:
+
+```{r, h3_inorcap_bb_kpi_kstest_plot}
+inorcap_bb_cdf <- data.frame(
+  x = sort(inorcap$bb_kpi_endring),
+  ecdf = ecdf(inorcap$bb_kpi_endring)(sort(inorcap$bb_kpi_endring))
+)
+
+inorcap_bb_cdf$normal_cdf <- pnorm(inorcap_bb_cdf$x,
+                                 mean = median(inorcap$bb_kpi_endring), 
+                                 sd = mad(inorcap$bb_kpi_endring))
+
+plot_kstest_inorcap_bb <- ggplot(inorcap_bb_cdf, aes(x = x)) +
+  geom_line(aes(y = normal_cdf, color = "Normal CDF"), size = 1, alpha = 0.7) +
+  geom_line(aes(y = ecdf, color = "Empirisk CDF"), size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Normal CDF" = "black",
+                                "Empirisk CDF" = "cornflowerblue")) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    title = "Sammenlikning mellom budsjettfordeling og normalfordeling",
+    x = "Årlig prosentvis endring (log-skala)",
+    y = "Kumulativ sannsynlighet",
+    color = "Kumulativ massefunksjon"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.81, 0.12), # Repositions  the legend
+        legend.background = element_rect(color = "black", size = 0.2),  
+        legend.key.size = unit(0.2, "cm"), # Adjusts legend box size
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  )
+
+plot_kstest_inorcap_bb
+```
+
+Hypotesetest av H3:
+
+```{r, bstest_h3}
+ipost_norm <- normf(ipost, "gb_kpi_endring", "bb_kpi_endring")
+h3_ipost_split <- split_df(ipost, ipost_norm, "gb_kpi_endring")
+
+Gini(h3_ipost_split$rhs1) -
+  Gini(h3_ipost_split$rhs2) # Omvendt test
+bstest_h3_gb_rhs <- bootstrap_gini_test(h3_ipost_split$rhs2, h3_ipost_split$rhs1)
+
+Gini(h3_ipost_split$lhs1) -
+  Gini(h3_ipost_split$lhs2) # Omvendt test
+bstest_h3_gb_lhs <- bootstrap_gini_test(h3_ipost_split$lhs2, h3_ipost_split$lhs1)
+
+h3_ipost_split <- split_df(ipost, ipost_norm, "bb_kpi_endring")
+
+Gini(h3_ipost_split$rhs1) -
+  Gini(h3_ipost_split$rhs2) # Omvendt test
+bstest_h3_bb_rhs <- bootstrap_gini_test(h3_ipost_split$rhs2, h3_ipost_split$rhs1)
+
+
+Gini(h3_ipost_split$lhs1) -
+  Gini(h3_ipost_split$lhs2) # Omvendt test
+bstest_h3_bb_lhs <- bootstrap_gini_test(h3_ipost_split$lhs2, h3_ipost_split$lhs1)
+```
+
+Oversikt:
+
+```{r, bstest_results}
+
+bstest_results <- data.frame(
+  Hypotese = c("H3", "H3"),
+  Påstand = c("G(x) > G(N)", "G(x) > G(N)"),
+  Dokument = c("Budsjettforslag", "Budsjettvedtak"),
+  P_lhs = c(bstest_h3_gb_lhs$p_value,
+            bstest_h3_bb_lhs$p_value),
+  Sign_lhs = c(signif(bstest_h3_gb_lhs$p_value),
+               signif(bstest_h3_bb_lhs$p_value)),
+  P_rhs = c(bstest_h3_gb_rhs$p_value,
+            bstest_h3_bb_rhs$p_value),
+  Sign_rhs = c(signif(bstest_h3_gb_rhs$p_value),
+               signif(bstest_h3_bb_rhs$p_value)))
+tt(bstest_results)
+```
+
+### 
+
+## R-3 Gini-koeffisienten
+
+Gini-koeffisienten til normal $\hat{G}_N=0.4133769$.
+
+### R-3.1 Post
+
+Gini-estimater av høyre og venstre side av fordelingen av endringer med postinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, ipost_gini}
+h3_ipost_gini <- do.call(rbind, lapply(h3_ipost_list, gini))
+
+h3_ipost_gini <- h3_ipost_gini %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_ipost_list, length)),
+    DifferanseRHS = Gini_right-Gini_right_norm,
+    DifferanseLHS = Gini_left-Gini_left_norm
+    ) %>%
+  dplyr::select(
+    Datagrunnlag, N, 
+    Gini_right, Gini_right_norm, DifferanseRHS,
+    Gini_left, Gini_left_norm, DifferanseLHS
+  ) %>%
+  rename("Gini RHS" = Gini_right,
+         "Gini LHS" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+
+tt(h3_ipost_gini)
+```
+
+Jeg simulerer datasett basert på Gini-estimatene:
+
+```{r, ipost_lc}
+ipost_gb_lc_lhs <- Lc(abs(ipost$gb_kpi_endring[ipost$gb_kpi_endring <= median(ipost$gb_kpi_endring)]))
+ipost_bb_lc_lhs <- Lc(abs(ipost$bb_kpi_endring[ipost$bb_kpi_endring <= median(ipost$bb_kpi_endring)]))
+ipost_gb_lc_rhs <- Lc(ipost$gb_kpi_endring[ipost$gb_kpi_endring > median(ipost$gb_kpi_endring)])
+ipost_bb_lc_rhs <- Lc(ipost$bb_kpi_endring[ipost$bb_kpi_endring > median(ipost$bb_kpi_endring)])
+
+ipost_gb_lc_lhs <- data.frame(p = ipost_gb_lc_lhs$p, L = ipost_gb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+ipost_bb_lc_lhs <- data.frame(p = ipost_bb_lc_lhs$p, L = ipost_bb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+ipost_gb_lc_rhs <- data.frame(p = ipost_gb_lc_rhs$p, L = ipost_gb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+
+ipost_bb_lc_rhs <- data.frame(p = ipost_bb_lc_rhs$p, L = ipost_bb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+```
+
+Plott av Lorenz-kurve for Gul bok med postinndeling:
+
+```{r, ipost_gb_lc}
+plot_ipost_gb_lc_lhs <- ggplot(ipost_gb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Inntektsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_ipost_gb_lc_rhs <- ggplot(ipost_gb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Inntektsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_ipost_gb_lc <- grid.arrange(plot_ipost_gb_lc_lhs, plot_ipost_gb_lc_rhs, ncol = 2)
+```
+
+Plott av Lorenz-kurve for Blå bok med postinndeling:
+
+```{r, ipost_bb_lc}
+plot_ipost_bb_lc_lhs <- ggplot(ipost_bb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Inntektsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_ipost_bb_lc_rhs <- ggplot(ipost_bb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Inntektsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_ipost_bb_lc <- grid.arrange(plot_ipost_bb_lc_lhs, plot_ipost_bb_lc_rhs, ncol = 2)
+```
+
+### R-3.2 Kapittel
+
+Gini-estimater av høyre og venstre side av fordelingen av endringer med kapittelinndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, ikap_gini}
+h3_ikap_gini <- do.call(rbind, lapply(h3_ikap_list, gini))
+
+h3_ikap_gini <- h3_ikap_gini %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_ikap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, 
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Gini RHS" = Gini_right,
+         "Gini LHS" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+
+tt(h3_ikap_gini)
+```
+
+Jeg simulerer datasett basert på Gini-estimatene:
+
+```{r, ikap_lc}
+ikap_gb_lc_lhs <- Lc(abs(ikap$gb_kpi_endring[ikap$gb_kpi_endring <= median(ikap$gb_kpi_endring)]))
+ikap_bb_lc_lhs <- Lc(abs(ikap$bb_kpi_endring[ikap$bb_kpi_endring <= median(ikap$bb_kpi_endring)]))
+ikap_gb_lc_rhs <- Lc(ikap$gb_kpi_endring[ikap$gb_kpi_endring > median(ikap$gb_kpi_endring)])
+ikap_bb_lc_rhs <- Lc(ikap$bb_kpi_endring[ikap$bb_kpi_endring > median(ikap$bb_kpi_endring)])
+
+ikap_gb_lc_lhs <- data.frame(p = ikap_gb_lc_lhs$p, L = ikap_gb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+ikap_bb_lc_lhs <- data.frame(p = ikap_bb_lc_lhs$p, L = ikap_bb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+ikap_gb_lc_rhs <- data.frame(p = ikap_gb_lc_rhs$p, L = ikap_gb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+
+ikap_bb_lc_rhs <- data.frame(p = ikap_bb_lc_rhs$p, L = ikap_bb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+```
+
+Plott av Lorenz-kurve for Gul bok med kapittelinndeling:
+
+```{r, ikap_gb_lc}
+plot_ikap_gb_lc_lhs <- ggplot(ikap_gb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Inntektsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_ikap_gb_lc_rhs <- ggplot(ikap_gb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Inntektsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_ikap_gb_lc <- grid.arrange(plot_ikap_gb_lc_lhs, plot_ikap_gb_lc_rhs, ncol = 2)
+```
+
+Plott av Lorenz-kurve for Blå bok med kapittelinndeling:
+
+```{r, ikap_bb_lc}
+plot_ikap_bb_lc_lhs <- ggplot(ikap_bb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Inntektsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_ikap_bb_lc_rhs <- ggplot(ikap_bb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Inntektsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_ikap_bb_lc <- grid.arrange(plot_ikap_bb_lc_lhs, plot_ikap_bb_lc_rhs, ncol = 2)
+```
+
+### R-3.3 NORCAP
+
+Gini-estimater av høyre og venstre side av fordelingen av endringer med NORCAP-inndeling sammenliknet med normalfordelingen av forventningen og standardavviket til de empiriske dataene:
+
+```{r, inorcap_gini}
+h3_inorcap_gini <- do.call(rbind, lapply(h3_inorcap_list, gini))
+
+h3_inorcap_gini <- h3_inorcap_gini %>%
+  mutate(
+    Datagrunnlag = h3_navn,
+    N = c(lapply(h3_inorcap_list, length)
+    )) %>%
+  dplyr::select(
+    Datagrunnlag, N, 
+    Gini_right, Gini_right_norm,
+    Gini_left, Gini_left_norm
+  ) %>%
+  rename("Gini RHS" = Gini_right,
+         "Gini LHS" = Gini_left,
+         "Gini RHS (normal)" = Gini_right_norm,
+         "Gini LHS (normal)" = Gini_left_norm)
+
+tt(h3_inorcap_gini)
+```
+
+Jeg simulerer datasett basert på Gini-estimatene:
+
+```{r, inorcap_lc}
+inorcap_gb_lc_lhs <- Lc(abs(inorcap$gb_kpi_endring[inorcap$gb_kpi_endring <= median(inorcap$gb_kpi_endring)]))
+inorcap_bb_lc_lhs <- Lc(abs(inorcap$bb_kpi_endring[inorcap$bb_kpi_endring <= median(inorcap$bb_kpi_endring)]))
+inorcap_gb_lc_rhs <- Lc(inorcap$gb_kpi_endring[inorcap$gb_kpi_endring > median(inorcap$gb_kpi_endring)])
+inorcap_bb_lc_rhs <- Lc(inorcap$bb_kpi_endring[inorcap$bb_kpi_endring > median(inorcap$bb_kpi_endring)])
+
+inorcap_gb_lc_lhs <- data.frame(p = inorcap_gb_lc_lhs$p, L = inorcap_gb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+inorcap_bb_lc_lhs <- data.frame(p = inorcap_bb_lc_lhs$p, L = inorcap_bb_lc_lhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p,
+         curve_type = "Lorenz-kurve", likhet_type = "Likhetslinje")
+
+inorcap_gb_lc_rhs <- data.frame(p = inorcap_gb_lc_rhs$p, L = inorcap_gb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+
+inorcap_bb_lc_rhs <- data.frame(p = inorcap_bb_lc_rhs$p, L = inorcap_bb_lc_rhs$L) %>%
+  mutate(perf_likhet = p, lorenz = 1 - p)
+```
+
+Plott av Lorenz-kurve for Gul bok med NORCAP-inndeling:
+
+```{r, inorcap_gb_lc}
+plot_inorcap_gb_lc_lhs <- ggplot(inorcap_gb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Inntektsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_inorcap_gb_lc_rhs <- ggplot(inorcap_gb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Inntektsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_inorcap_gb_lc <- grid.arrange(plot_inorcap_gb_lc_lhs, plot_inorcap_gb_lc_rhs, ncol = 2)
+```
+
+Plott av Lorenz-kurve for Blå bok med NORCAP-inndeling:
+
+```{r, inorcap_bb_lc}
+plot_inorcap_bb_lc_lhs <- ggplot(inorcap_bb_lc_lhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = L, color = curve_type), size = 1) +
+  geom_line(aes(y = perf_likhet, color = likhet_type), size = 1) +
+  scale_color_manual(
+    values = c("Lorenz-kurve" = "blue", "Likhetslinje" = "red"),
+    name = "Kurvetype"
+  ) +
+  scale_x_reverse() +
+  labs(
+    title = "Lorenz-kurve for venstre side",
+    x = "Inntektsreduksjoner (Gini LHS)",
+    y = "Andel av endringer"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    legend.position = c(0.2, 0.9),
+    legend.background = element_rect(color = "black", size = 0.2),  
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black"),
+    legend.key.size = unit(0.4, "cm"))
+
+plot_inorcap_bb_lc_rhs <- ggplot(inorcap_bb_lc_rhs, aes(x = lorenz)) +
+  geom_ribbon(aes(ymin = L, ymax = perf_likhet), fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(ymin = 0, ymax = L), fill = "blue", alpha = 0.5) +
+  geom_line(aes(y = L), color = "blue", size = 1) +
+  geom_line(aes(y = perf_likhet), color = "red", size = 1) +
+  labs(
+    title = "Lorenz-kurve for høyre side",
+    x = "Inntektsøkninger (Gini RHS)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+plot_inorcap_bb_lc <- grid.arrange(plot_inorcap_bb_lc_lhs, plot_inorcap_bb_lc_rhs, ncol = 2)
+```
+
+### R-4 Budsjettfordelinger
+
+Jeg plotter budsjettfordelingene for Gul bok og Blå bok, i løpende og KPI-justerte priser.
+
+### R-4.1 Postfordelinger
+
+Plott av Gul bok for postinndeling:
+
+```{r, ipost_GB}
+plot_ipost_gb <- ggmass(
+  ipost, 
+  ipost$gb_endring,
+  100,
+  "Inntekter i budsjettforslag")
+
+plot_ipost_gb
+```
+
+Plott av Gul bok og T-fordeling for postinndeling:
+
+```{r, ipost_GB_medT}
+plot_ipost_gb_gg1 <- ggdensityt(ipost, 
+                              ipost$gb_endring, 
+                              2, 
+                              "Utgifter i Gul bok")
+
+plot_ipost_gb_gg2 <- ggdensitynorm(ipost, 
+                              ipost$gb_endring, 
+                              100, 
+                              "Utgifter i Gul bok")
+
+plot_ipost_gb_gg3 <- ggmasst(ipost, 
+                              ipost$gb_endring, 
+                              100, 
+                              "Utgifter i Gul bok")
+plot_ipost_gb_gg1
+plot_ipost_gb_gg2
+plot_ipost_gb_gg3
+```
+
+Plott av Blå bok for postinndeling:
+
+```{r, ipost_BB}
+plot_ipost_bb <- ggmass(
+  ipost, 
+  ipost$bb_endring,
+  100,
+  "Inntekter i budsjettvedtak")
+
+plot_ipost_bb
+```
+
+Plott av Blå bok og T-fordeling for postinndeling:
+
+```{r, ipost_BB_medT}
+plot_ipost_bb_t <- ggplot(ipost, aes(x = bb_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ipost, ipost$bb_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ipost_bb_t
+```
+
+Plott av KPI-justert Gul bok for postinndeling:
+
+```{r, ipost_GB-KPI}
+plot_ipost_gb_kpi <- ggmass(
+  ipost, 
+  ipost$gb_kpi_endring,
+  100,
+  "Inntekter i budsjettforslag, inflasjonsjustert")
+
+plot_ipost_gb_kpi
+```
+
+Plott av KPI-justert Gul bok og T-fordeling for postinndeling:
+
+```{r, ipost_GB-KPI_medT}
+plot_ipost_gb_kpi_t <- ggplot(ipost, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ipost, ipost$gb_kpi_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ipost_gb_kpi_t
+```
+
+Plott av KPI-justert Blå bok for postinndeling:
+
+```{r, ipost_BB-KPI}
+plot_ipost_bb_kpi <- ggmass(
+  ipost, 
+  ipost$bb_kpi_endring,
+  100,
+  "Inntekter i budsjettvedtak, inflasjonsjustert")
+
+plot_ipost_bb_kpi
+```
+
+Plott av KPI-justert Blå bok og T-fordeling for postinndeling:
+
+```{r, ipost_BB-KPI_medT}
+plot_ipost_bb_kpi_t <- ggplot(ipost, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ipost, ipost$bb_kpi_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ipost_bb_kpi_t
+```
+
+Jeg pivoterer dataene til langt format:
+
+```{r, ipost_pivot_transformert}
+ipost_pivot <- ipost %>%
+  pivot_longer(cols = c(gb_endring,bb_endring,gb_kpi_endring,bb_kpi_endring), 
+               names_to = "variable", values_to = "value")
+```
+
+Plott av samtlige fordelinger, uavkortet:
+
+```{r, ipost_samlet_fullstendig}
+plot_ipost_pivot <- ggplot(ipost_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter", x = "Årlig prosentvis endring", y = "Frekvens")
+
+plot_ipost_pivot
+```
+
+Plott av samtlige fordelinger, avkortet:
+
+```{r, ipost_samlet_avkortet}
+plot_ipost_pivot_kort <- ggplot(ipost_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100)) +
+  scale_y_continuous(limits = c(0, 3000))
+
+plot_ipost_pivot_kort
+```
+
+### R-4.2 Kapittelfordelinger
+
+Plott av Gul bok for kapittelinndeling:
+
+```{r, ikap_GB}
+plot_ikap_gb <- ggplot(ikap, aes(x = gb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ikap_gb
+```
+
+Plott av Gul bok og T-fordeling for kapittelinndeling:
+
+```{r, ikap_GB_medT}
+plot_ikap_gb_t <- ggplot(ikap, aes(x = gb_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ikap, ikap$gb_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ikap_gb_t
+```
+
+Plott av Blå bok for kapittelinndeling:
+
+```{r, ikap_BB}
+plot_ikap_bb <- ggplot(ikap, aes(x = bb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+
+  ) +
+  labs(title = "Inntekter i Blå bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ikap_bb
+```
+
+Plott av Blå bok og T-fordeling for kapittelinndeling:
+
+```{r, ikap_BB_medT}
+plot_ikap_bb_t <- ggplot(ikap, aes(x = bb_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ikap, ikap$bb_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ikap_bb_t
+```
+
+Plott av KPI-justert Gul bok for kapittelinndeling:
+
+```{r, ikap_GB-KPI}
+plot_ikap_gb_kpi <- ggplot(ikap, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ikap_gb_kpi
+```
+
+Plott av KPI-justert Gul bok og T-fordeling for kapittelinndeling:
+
+```{r, ikap_GB-KPI_medT}
+plot_ikap_gb_kpi_t <- ggplot(ikap, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ikap, ikap$gb_kpi_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ikap_gb_kpi_t
+```
+
+Plott av KPI-justert Blå bok for kapittelinndeling:
+
+```{r, ikap_BB-KPI}
+plot_ikap_bb_kpi <- ggplot(ikap, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_ikap_bb_kpi
+```
+
+Plott av KPI-justert Blå bok og T-fordeling for kapittelinndeling:
+
+```{r, ikap_BB-KPI_medT}
+plot_ikap_bb_kpi_t <- ggplot(ikap, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 200, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(ikap, ikap$bb_kpi_endring), aes(x = variabel), 
+                 bins = 200, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_ikap_bb_kpi_t
+```
+
+Jeg pivoterer dataene til langt format:
+
+```{r, ikap_pivot_transformert}
+ikap_pivot <- ikap %>%
+  pivot_longer(cols = c(gb_endring,bb_endring,gb_kpi_endring,bb_kpi_endring), 
+               names_to = "variable", values_to = "value")
+```
+
+Plott av samtlige fordelinger, uavkortet:
+
+```{r, ikap_samlet_fullstendig}
+plot_ikap_pivot <- ggplot(ikap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter", x = "Årlig prosentvis endring", y = "Frekvens")
+
+plot_ikap_pivot
+```
+
+Plott av samtlige fordelinger, avkortet:
+
+```{r, ikap_samlet_avkortet}
+plot_ikap_pivot_kort <- ggplot(ikap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100)) +
+  scale_y_continuous(limits = c(0, 2500))
+
+plot_ikap_pivot_kort
+```
+
+### R-4.3 NORCAP-fordelinger
+
+Plott av Gul bok for NORCAP-inndeling:
+
+```{r, inorcap_GB}
+plot_inorcap_gb <- ggplot(inorcap, aes(x = gb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_inorcap_gb
+```
+
+Plott av Gul bok og T-fordeling for NORCAP-inndeling:
+
+```{r, inorcap_GB_medT}
+plot_inorcap_gb_t <- ggplot(inorcap, aes(x = gb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(inorcap, inorcap$gb_endring), aes(x = variabel), 
+                 bins = 100, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_inorcap_gb_t
+```
+
+Plott av Blå bok for NORCAP-inndeling:
+
+```{r, inorcap_BB}
+plot_inorcap_bb <- ggplot(inorcap, aes(x = bb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+
+  ) +
+  labs(title = "Inntekter i Blå bok", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_inorcap_bb
+```
+
+Plott av Blå bok og T-fordeling for NORCAP-inndeling:
+
+```{r, inorcap_BB_medT}
+plot_inorcap_bb_t <- ggplot(inorcap, aes(x = bb_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(inorcap, inorcap$bb_endring), aes(x = variabel), 
+                 bins = 100, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_inorcap_bb_t
+```
+
+Plott av KPI-justert Gul bok for NORCAP-inndeling:
+
+```{r, inorcap_GB-KPI}
+plot_inorcap_gb_kpi <- ggplot(inorcap, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_inorcap_gb_kpi
+```
+
+Plott av KPI-justert Gul bok og T-fordeling for NORCAP-inndeling:
+
+```{r, inorcap_GB-KPI_medT}
+plot_inorcap_gb_kpi_t <- ggplot(inorcap, aes(x = gb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(inorcap, inorcap$gb_kpi_endring), aes(x = variabel), 
+                 bins = 100, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Gul bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_inorcap_gb_kpi_t
+```
+
+Plott av KPI-justert Blå bok for NORCAP-inndeling:
+
+```{r, inorcap_BB-KPI}
+plot_inorcap_bb_kpi <- ggplot(inorcap, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok, KPI-justert", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 1000), 
+                     breaks = seq(-100, 1000, 100))
+
+plot_inorcap_bb_kpi
+```
+
+Plott av KPI-justert Blå bok og T-fordeling for NORCAP-inndeling:
+
+```{r, inorcap_BB-KPI_medT}
+plot_inorcap_bb_kpi_t <- ggplot(inorcap, aes(x = bb_kpi_endring)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  geom_histogram(data = tfordeling(inorcap, inorcap$bb_kpi_endring), aes(x = variabel), 
+                 bins = 100, fill = "red", alpha = 0.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter i Blå bok", 
+       x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 50))
+
+plot_inorcap_bb_kpi_t
+```
+
+Jeg pivoterer dataene til langt format:
+
+```{r, inorcap_pivot_transformert}
+inorcap_pivot <- inorcap %>%
+  pivot_longer(cols = c(gb_endring,bb_endring,gb_kpi_endring,bb_kpi_endring), 
+               names_to = "variable", values_to = "value")
+```
+
+Plott av samtlige fordelinger, uavkortet:
+
+```{r, inorcap_samlet_fullstendig}
+plot_inorcap_pivot <- ggplot(inorcap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5), panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter", x = "Årlig prosentvis endring", y = "Frekvens")
+
+plot_inorcap_pivot
+```
+
+Plott av samtlige fordelinger, avkortet:
+
+```{r, inorcap_samlet_avkortet}
+plot_inorcap_pivot_kort <- ggplot(inorcap_pivot, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free",
+             labeller = labeller(variable = c(
+               "gb_endring" = "(3) Gul bok",
+               "bb_endring" = "(1) Blå bok",
+               "gb_kpi_endring" = "(4) Gul bok, KPI-justert",
+               "bb_kpi_endring" = "(2) Blå bok, KPI-justert"
+             ))) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  ) +
+  labs(title = "Inntekter", x = "Årlig prosentvis endring", y = "Frekvens") +
+  scale_x_continuous(limits = c(-100, 250), 
+                     breaks = seq(-100, 250, 100)) +
+  scale_y_continuous(limits = c(0, 600))
+
+plot_inorcap_pivot_kort
+```

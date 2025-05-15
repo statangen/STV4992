@@ -1,0 +1,398 @@
+---
+title: "Dokumentasjon: Agendamangfold (H2)"
+author: "T. Tangen"
+date: "2025-04-07"
+output: pdf_document
+warning: false
+messages: false
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(haven)
+library(ggplot2)
+library(tinytable)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(zoo)
+library(PxWebApiData)
+library(jsonlite)
+library(httr)
+library(sf)
+library(MASS)
+library(sandwich)
+library(stargazer)
+library(moments)
+library(DescTools)
+library(e1071)
+library(lmom)
+library(ineq)
+library(scales)
+library(entropy)
+library(tidyr)
+options(scipen=999)
+```
+
+```{r, oppsett}
+b <- read_excel("b.xlsx", 1)
+kpi <- read_excel("inflasjon.xlsx", 1)
+kpi <- kpi %>%
+  dplyr::select(1:2)
+b <-     b %>%
+  left_join(kpi, by = "år") %>%
+  mutate(gb_kpi = gb * (100 / kpi_2015)) %>%
+  mutate(bb_kpi = bb * (100 / kpi_2015))
+b <- b %>% dplyr::select(!kpi_2015)
+b <- b %>% filter(!(bb == 0 & gb == 0))
+h2_u <- b %>% filter(kap < 3000)
+h2_i <- b %>% filter(kap >= 3000)
+
+valgår <- data.frame(
+  år = 1999:2023,
+  valgperiode = c(rep("1997-2001", 2), 
+                  rep("2001-2005", 4),
+                  rep("2005-2009", 4),
+                  rep("2009-2013", 4),
+                  rep("2013-2017", 4),
+                  rep("2017-2021", 4),
+                  rep("2021-2025", 3)
+                  ))
+```
+
+Hypotese 2 lyder: Statsbudsjettet blir mer mangfoldig over tid.
+
+# 1 Antallet unike policykoder
+
+En måte å få overblikk over mangfold, er å se på unike policykoder for hvert år.
+
+## 1.1 Utgifter
+
+Jeg trekker ut unike policykoder for hvert år:
+
+```{r, h2_unorcap_unike}
+h2_unorcap_unike <- h2_u %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(norcap)))
+
+plot_h2_unorcap_unike <- ggplot(h2_unorcap_unike, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE, 
+              color = "red", linetype = "dashed") +
+    geom_hline(yintercept = mean(h2_unorcap_unike$Antall),
+             color = "blue", linetype = "dashed") +  
+  labs(title = "Utgifter",
+       x = "År",
+       y = "Antall unike policykoder") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = seq(max(h2_unorcap_unike$Antall), 
+                                  min(h2_unorcap_unike$Antall)))
+
+plot_h2_unorcap_unike
+```
+
+## 1.2 Inntekter
+
+Jeg trekker ut unike policykoder for hvert år:
+
+```{r, h2_inorcap_unike}
+h2_inorcap_unike <- h2_i %>%
+  group_by(år) %>%
+  summarise(Antall = length(unique(norcap)))
+
+plot_h2_inorcap_unike <- ggplot(h2_inorcap_unike, aes(x = år, y = Antall)) +
+  geom_line() + 
+  geom_smooth(method = "lm", se = FALSE, 
+              color = "red", linetype = "dashed") +
+    geom_hline(yintercept = mean(h2_inorcap_unike$Antall),
+             color = "blue", linetype = "dashed") +
+  labs(title = "Inntekter",
+       x = "År",
+       y = "Antall unike policykoder") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = seq(max(h2_inorcap_unike$Antall), 
+                                  min(h2_inorcap_unike$Antall)))
+
+plot_h2_inorcap_unike
+```
+
+# 2 Entropiskår
+
+## 2.1 Utgifter
+
+Jeg beregner entropiskår for hvert år:
+
+```{r, h2_unorcap_entropi}
+h2_unorcap_entropi <- h2_u %>%
+  group_by(år, norcap) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(år) %>%
+  mutate(prob = n / sum(n)) %>%
+  summarise(
+    entropi = -sum(prob * log(prob), na.rm = TRUE)
+  ) %>%
+  mutate(entronorm = (entropi / log(length(unique(h2_u$norcap)))) * 100)
+
+h2_unorcap_entropi <- h2_unorcap_entropi %>%
+  mutate(endring = (entronorm / lag(entronorm) - 1) * 100)
+
+table_h2_unorcap_entropi <- data.frame(
+  Oppsummering = c("Laveste H", "Høgeste H",  "Gjennomsnittlig H",
+                  "Høgeste mulige", "SD(H)", "N"),
+  Estimat = c(min(h2_unorcap_entropi$entropi), max(h2_unorcap_entropi$entropi),
+              mean(h2_unorcap_entropi$entropi), log(235),
+              sd(h2_unorcap_entropi$entropi), round(length(h2_unorcap_entropi$entropi))),
+  Normalisert = c(min(h2_unorcap_entropi$entronorm), max(h2_unorcap_entropi$entronorm),
+                  mean(h2_unorcap_entropi$entronorm), 100,
+                  sd(h2_unorcap_entropi$entronorm), round(length(h2_unorcap_entropi$entronorm
+                  ))))
+
+tt(table_h2_unorcap_entropi)
+```
+
+Jeg plotter entropiskår for hvert år:
+
+```{r, h2_unorcap_entropi_tidsserie}
+plot_h2_unorcap_entropi <- ggplot(h2_unorcap_entropi, aes(x = år, y = entronorm)) +
+  geom_line() + 
+  geom_smooth(data = subset(h2_unorcap_entropi, år >= 2002 & år <= 2023),
+              method = "lm", se = TRUE, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h2_unorcap_entropi$entronorm),
+             color = "blue", linetype = "dashed") +
+  labs(title = "Utgifter",
+       x = "År",
+       y = " Normalisert entropi (Shannons H)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h2_unorcap_entropi
+```
+
+Jeg tar regresjonen av entropiskår over år (den røde linjen):
+
+```{r, h2_unorcap_entropi_regresjon}
+
+mod1_h2_unorcap_entropi <- lm(entronorm ~ år, data = h2_unorcap_entropi)
+mod2_h2_unorcap_entropi <- lm(entronorm ~ år, 
+                              data = subset(h2_unorcap_entropi, år >= 2002 & år <= 2023))
+
+summary(mod1_h2_unorcap_entropi)
+summary(mod2_h2_unorcap_entropi)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_ukappost_endringer}
+h2_unorcap_entropi2002 <- h2_unorcap_entropi %>% 
+  filter(år > 2002)
+
+plot_h2_unorcap_entropi_diff <- ggplot(h2_unorcap_entropi, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_segment(aes(x = 2002, xend = max(år),
+                   y = mean(h2_unorcap_entropi2002$endring), 
+                   yend = mean(h2_unorcap_entropi2002$endring)),
+               color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  
+  labs(title = "Utgifter", x = "År",
+       y = "Prosentvis endring i entropiskår") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h2_unorcap_entropi_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1a_ukappost_ttest}
+ttest_h2_unorcap_entropi <- t.test(h2_unorcap_entropi2002$endring, alternative = "less", mu = 0)
+
+cat("P-verdi:", ttest_h2_unorcap_entropi$p.value, 
+    ifelse(test = ttest_h2_unorcap_entropi$p.value < 0.05, 
+       "- endringen er signifikant",
+       "- endringen er ikke signifikant"))
+```
+
+## 2.2 Inntekter
+
+Jeg beregner entropiskår for hvert år:
+
+```{r, h2_inorcap_entropi}
+h2_inorcap_entropi <- h2_i %>%
+  group_by(år, norcap) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(år) %>%
+  mutate(prob = n / sum(n)) %>%
+  summarise(
+    entropi = -sum(prob * log(prob), na.rm = TRUE)
+  ) %>%
+  mutate(entronorm = (entropi / log(length(unique(h2_i$norcap)))) * 100)
+
+h2_inorcap_entropi <- h2_inorcap_entropi %>%
+  mutate(endring = (entronorm / lag(entronorm) - 1) * 100)
+
+table_h2_inorcap_entropi <- data.frame(
+  Oppsummering = c("Laveste H", "Høgeste H",  "Gjennomsnittlig H",
+                  "Høgeste mulige", "SD(H)", "N"),
+  Estimat = c(min(h2_inorcap_entropi$entropi), max(h2_inorcap_entropi$entropi),
+              mean(h2_inorcap_entropi$entropi), log(235),
+              sd(h2_inorcap_entropi$entropi), round(length(h2_inorcap_entropi$entropi))),
+  Normalisert = c(min(h2_inorcap_entropi$entronorm), max(h2_inorcap_entropi$entronorm),
+                  mean(h2_inorcap_entropi$entronorm), 100,
+                  sd(h2_inorcap_entropi$entronorm), round(length(h2_inorcap_entropi$entronorm
+                  ))))
+
+tt(table_h2_inorcap_entropi)
+```
+
+Jeg plotter entropiskår for hvert år:
+
+```{r, h2_inorcap_entropi_tidsserie}
+plot_h2_inorcap_entropi <- ggplot(h2_inorcap_entropi, aes(x = år, y = entronorm)) +
+  geom_line() + 
+  geom_smooth(method = "glm", formula = y ~ poly(x, 2), se = TRUE,
+              color = "red", linetype = "dashed") +
+  geom_hline(yintercept = mean(h2_inorcap_entropi$entronorm),
+             color = "blue", linetype = "dashed") +
+  labs(title = "Inntekter",
+       x = "År",
+       y = " Normalisert entropi (Shannons H)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+    ) +
+  scale_x_continuous(breaks = seq(1999,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h2_inorcap_entropi
+```
+
+Jeg tar regresjonen av entropiskår over år (den røde linjen):
+
+```{r, h2_inorcap_entropi_regresjon}
+mod1_h2_inorcap_entropi <- lm(entronorm ~ år, data = h2_inorcap_entropi)
+mod2_h2_inorcap_entropi <- lm(entronorm ~ poly(år, 2), data = h2_inorcap_entropi)
+
+summary(mod1_h2_inorcap_entropi)
+summary(mod2_h2_inorcap_entropi)
+```
+
+Jeg tar førstedifferansen av tidsserien for å få endringen over tid:
+
+```{r, h1a_ikappost_endringer}
+plot_h2_inorcap_entropi_diff <- ggplot(h2_inorcap_entropi, aes(x = år, y = endring)) +
+  geom_line() + 
+  geom_hline(yintercept = mean(h2_inorcap_entropi$endring, na.rm = TRUE),
+             color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  labs(title = "Inntekter", x = "År",
+       y = "Prosentvis endring i entropiskår") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+    ) +
+  scale_x_continuous(breaks = seq(2000,2023, 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+
+plot_h2_inorcap_entropi_diff
+```
+
+Jeg tester om gjennomsnittet av endringene er signifikant forskjellig fra null:
+
+```{r, h1a_ikappost_ttest}
+ttest_h2_inorcap_entropi <- t.test(h2_inorcap_entropi$endring, alternative = "greater", mu = 0)
+
+cat("P-verdi:", ttest_h2_inorcap_entropi$p.value, 
+  ifelse(test = ttest_h2_inorcap_entropi$p.value < 0.05, 
+         "- endringen er signifikant",
+         "- endringen er ikke signifikant"))
+```
+
+# X Kontroll
+
+```{r, kontroll_entropi}
+h2_unorcap_entropi <- h2_unorcap_entropi %>%
+  left_join(valgår, by = "år")
+
+ggplot(h2_unorcap_entropi, aes(x = år, y = entropi)) +
+  geom_point(aes(color = as.factor(valgperiode)), size = 2, alpha = 0.8) +
+  geom_hline(yintercept = mean(h2_unorcap_entropi$entropi), linetype = "dashed") +
+  geom_smooth(aes(group = valgperiode, color = as.factor(valgperiode)), 
+              method = "lm", se = TRUE, linewidth = 1, alpha = 0.3) +
+  geom_vline(data = h2_unorcap_entropi %>% group_by(valgperiode) %>% slice_min(år), 
+             aes(xintercept = år), color = "grey50", linetype = "dotted") +
+  scale_color_brewer(palette = "Dark2", name = "Stortingsperiode") +
+  labs(
+    x = "År", 
+    y = " Normalisert entropi (Shannons H)") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8)
+  ) +
+  scale_x_continuous(breaks = seq(min(h2_unorcap_entropi$år), max(h2_unorcap_entropi$år), 1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+```

@@ -1,0 +1,377 @@
+---
+title: "Hovedprosedyre"
+author: "T. Tangen"
+date: "2025-03-05"
+output: pdf_document
+warning: false
+messages: false
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(haven)
+library(ggplot2)
+library(tinytable)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(zoo)
+library(PxWebApiData)
+library(jsonlite)
+library(httr)
+library(sf)
+library(MASS)
+library(sandwich)
+library(stargazer)
+library(moments)
+library(DescTools)
+library(e1071)
+library(lmom)
+options(scipen=999)
+```
+
+# Oppsett
+
+Fremgangsmåten er som følger:
+
+Mastersettet er det overordnete datasettet som inneholder
+
+Vi starter med å sette sammen et mastersett `b` som inneholder alle nødvendige variabler fra de andre datasettene. Til slutt gjør vi direkte justeringer som kan gjøres på den enkelte observasjon som å fjerne nullobservasjoner og inflasjonsjustering av beløpene.
+
+**Tekniske justeringer**
+
+-   Konsumprisindeksjusterte priser
+
+-   Fjerne nullobservasjoner
+
+-   Fjerne udefinerte observasjoner (Inf)
+
+-   Fjerne
+
+```{r}
+b <- read_excel("b.xlsx", 1) # Budsjettdata
+```
+
+## Tekniske justeringer
+
+### Inflasjonsjustering
+
+```{r, Inflasjonsjustering}
+kpi <- read_excel("inflasjon.xlsx", 1) # Inflasjonsdata
+kpi <- kpi %>% # Henter ut for referanseår KPI 2015 = 100
+  dplyr::select(1:2)
+
+b <- b %>% # Oppretter nye variabler med inflasjonsjusterte priser
+  left_join(kpi, by = "år") %>%
+  mutate(gb_kpi = gb * (100 / kpi_2015)) %>%
+  mutate(bb_kpi = bb * (100 / kpi_2015))
+
+# Fjerner unødvendige datasett og variabler.
+rm(kpi) 
+b <- b %>% dplyr::select(!kpi_2015)
+```
+
+### Nullobservasjoner
+
+Til slutt fjerner vi alle nullobservasjoner fra datasettet. Dette er observasjoner.
+
+```{r, Nullobservasjoner}
+b <- b %>% filter(!(bb == 0 & gb == 0)) # Fjerner alle nullobservasjoner
+```
+
+### Friksjonsendringer
+
+```{r, Friksjonsendringer}
+b <- b %>% mutate(gb_bb_endring = bb_kpi/gb_kpi - 1)
+```
+
+## Aggregering og stratifisering
+
+Årlig prosentvis endring (APC, *annual percentage change*) kan beregnes på ulike måter. Under har jeg definert tre funksjoner som beregner APC på ulikt vis.
+
+Subsettene er de datasettene vi bruker til analyseformål.
+
+### Inntekter og utgifter
+
+```{r, Inntekter-utgifter}
+u <- b %>% filter(kap < 3000) # Sorterer utgifter
+i <- b %>% filter(kap >= 3000) # Sorterer inntekter
+```
+
+### Beregning av årlig prosentvis endring
+
+Funksjonen `apc_kap` beregner
+
+```{r, apc_kap: APC beregnet etter kapittel}
+apc_kap <- function(df) {
+  df %>%
+    group_by(kap_t, år) %>%
+    summarise(
+      gb = sum(gb, na.rm = TRUE),
+      bb = sum(bb, na.rm = TRUE),
+      gb_kpi = sum(gb_kpi, na.rm = TRUE),
+      bb_kpi = sum(bb_kpi, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(kap_t, år) %>%
+    group_by(kap_t) %>%
+    mutate(
+      lag_år = lag(år),
+      lag_gb = lag(gb),
+      lag_bb = lag(bb),
+      lag_gb_kpi = lag(gb_kpi),
+      lag_bb_kpi = lag(bb_kpi),
+      
+      gb_endring = case_when(
+        år - lag_år == 1 & lag_gb > 0 & gb == 0 ~ -100,
+        år - lag_år == 1 & lag_gb == 0 & gb == 0 ~ 0,
+        år - lag_år == 1 ~ (gb - lag_gb) / lag_gb * 100,
+        TRUE ~ NA_real_
+      ),
+      
+      bb_endring = case_when(
+        år - lag_år == 1 & lag_bb > 0 & bb == 0 ~ -100,
+        år - lag_år == 1 & lag_bb == 0 & bb == 0 ~ 0,
+        år - lag_år == 1 ~ (bb - lag_bb) / lag_bb * 100,
+        TRUE ~ NA_real_
+      ),
+      
+      gb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_gb_kpi > 0 & gb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_gb_kpi == 0 & gb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (gb_kpi - lag_gb_kpi) / lag_gb_kpi * 100,
+        TRUE ~ NA_real_
+      ),
+      
+      bb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_bb_kpi > 0 & bb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_bb_kpi == 0 & bb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (bb_kpi - lag_bb_kpi) / lag_bb_kpi * 100,
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    dplyr::select(-lag_år, -lag_gb, -lag_bb, -lag_gb_kpi, -lag_bb_kpi) %>%
+    ungroup()
+}
+```
+
+```{r, apc_post: APC beregnet etter post}
+apc_post <- function(df) {
+  df %>%
+    arrange(as.numeric(post_id), år) %>%
+    group_by(post_id) %>%
+    mutate(
+      lag_år = lag(år),
+      lag_gb = lag(gb),
+      lag_bb = lag(bb),
+      lag_gb_kpi = lag(gb_kpi),
+      lag_bb_kpi = lag(bb_kpi),
+      
+      gb_endring = case_when(
+        år - lag_år == 1 & lag_gb > 0 & gb == 0 ~ -100,
+        år - lag_år == 1 & lag_gb == 0 & gb == 0 ~ 0,
+        år - lag_år == 1 ~ (gb - lag_gb) / lag_gb * 100,
+        TRUE ~ NA_real_
+      ),
+      
+      bb_endring = case_when(
+        år - lag_år == 1 & lag_bb > 0 & bb == 0 ~ -100,
+        år - lag_år == 1 & lag_bb == 0 & bb == 0 ~ 0,
+        år - lag_år == 1 ~ (bb - lag_bb) / lag_bb * 100,
+        TRUE ~ NA_real_
+      ),
+      
+      gb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_gb_kpi > 0 & gb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_gb_kpi == 0 & gb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (gb_kpi - lag_gb_kpi) / lag_gb_kpi * 100,
+        TRUE ~ NA_real_
+      ),
+      
+      bb_kpi_endring = case_when(
+        år - lag_år == 1 & lag_bb_kpi > 0 & bb_kpi == 0 ~ -100,
+        år - lag_år == 1 & lag_bb_kpi == 0 & bb_kpi == 0 ~ 0,
+        år - lag_år == 1 ~ (bb_kpi - lag_bb_kpi) / lag_bb_kpi * 100,
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    dplyr::select(-lag_år, -lag_gb, -lag_bb, -lag_gb_kpi, -lag_bb_kpi) %>%
+    ungroup()
+}
+```
+
+```{r, apc_norcap: APC beregnet etter NORCAP-kode}
+apc_norcap <- function(df) {
+  df %>%
+    group_by(norcap, år) %>%
+    summarise(
+      gb = sum(gb, na.rm = TRUE),
+      bb = sum(bb, na.rm = TRUE),
+      gb_kpi = sum(gb_kpi, na.rm = TRUE),
+      bb_kpi = sum(bb_kpi, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(norcap, år) %>%
+    group_by(norcap) %>%
+    mutate(
+      lag_år = lag(år),
+      gb_endring = ifelse(år - lag_år == 1, (gb - lag(gb)) / lag(gb) * 100, NA),
+      bb_endring = ifelse(år - lag_år == 1, (bb - lag(bb)) / lag(bb) * 100, NA),
+      gb_kpi_endring = ifelse(år - lag_år == 1, (gb_kpi - lag(gb_kpi)) / lag(gb_kpi) * 100, NA),
+      bb_kpi_endring = ifelse(år - lag_år == 1, (bb_kpi - lag(bb_kpi)) / lag(bb_kpi) * 100, NA)
+    ) %>%
+    dplyr::select(-lag_år) %>%
+    ungroup()
+}
+```
+
+```{r, APC}
+ukap <- apc_kap(u)
+upost <- apc_post(u)
+unorcap <- apc_norcap(u)
+ikap <- apc_kap(i)
+ipost <- apc_post(i)
+inorcap <- apc_norcap(i)
+```
+
+### Rensing av datasett
+
+```{r, rens_funksjon: Fjerner Inf og NA}
+rens <- function(df) {
+  df <- df %>%
+    filter(!is.infinite(gb_endring)) %>%  
+    filter(!is.infinite(gb_endring)) %>%
+    filter(!is.infinite(gb_kpi_endring)) %>%  
+    filter(!is.infinite(bb_kpi_endring)) %>%
+    filter(!is.na(gb_endring) & 
+             !is.na(bb_endring) & 
+             !is.na(gb_kpi_endring) & 
+             !is.na(bb_kpi_endring))
+}
+```
+
+```{r, rens}
+ukap <- rens(ukap)
+upost <- rens(upost)
+unorcap <- rens(unorcap)
+ikap <- rens(ikap)
+ipost <- rens(ipost)
+inorcap <- rens(inorcap)
+```
+
+### Regjeringsdata
+
+Legge til regjeringsvariabler på til kapittelsettet og NORCAP-settet
+
+```{r, Regjeringsdata}
+reg <- read_excel("reg.xlsx", 1) # Regjeringsdata
+ukap <- ukap %>%
+  left_join(reg, by = "år")
+unorcap <- unorcap %>%
+  left_join(reg, by = "år")
+ikap <- ikap %>%
+  left_join(reg, by = "år")
+inorcap <- inorcap %>%
+  left_join(reg, by = "år")
+rm(reg)
+```
+
+## Estimatorer
+
+### Estimator for sentraltendens: `sentraltendens`
+
+```{r, Sentraltendens}
+sentraltendens <- function(x) {
+  freq_table <- table(x)
+  mode_candidates <- as.numeric(names(freq_table[freq_table == max(freq_table)]))
+  mode_val <- mode_candidates[1] # Velg første
+  tol <- 1e-8  # Toleranseverdi for sammenligning
+  frekvens <- sum(abs(x - mode_val) < tol)  # Sikrer korrekt opptelling
+  
+  c(Gjennomsnitt = mean(x), 
+    Median = median(x), 
+    Modus = mode_val, 
+    Frekvens = frekvens)
+}
+```
+
+### Estimator for spredning: `spredning`
+
+```{r, Spredning}
+spredning <- function(x) {
+  c(Varians = var(x), 
+    SD = sd(x))
+}
+```
+
+### Estimator for L-kurtose-koeffisient: `lkurt`
+
+```{r, L-kurtose-funksjon}
+
+# Funksjon for å beregne statistikk
+lkurt <- function(vec, navn) {
+  lmoments <- samlmu(vec, nmom = 4)  # Beregn L-momenter
+  L_kurtosis <- lmoments[4]          # L-kurtose
+  
+  # Simulert normalfordelt vektor med samme størrelse, middelverdi og standardavvik
+  normal_vec <- rnorm(length(vec), mean = mean(vec), sd = sd(vec))
+  
+  # Beregn statistikk for normalfordelingen
+  lmoments_norm <- samlmu(normal_vec, nmom = 4)
+  L_kurtosis_norm <- lmoments_norm[4]
+  
+  return(data.frame(
+    L_kurtose = L_kurtosis, L_kurtose_norm = L_kurtosis_norm
+    ))
+}
+```
+
+### Estimator for Gini-koeffisient: `gini`
+
+```{r, Gini-funksjon}
+gini <- function(vec, navn) {
+  # Del datasettet i høyre- og venstreside av middelverdien
+  mid <- median(vec)  # Forventningsverdien
+  right_side <- vec[vec > mid]  # Verdier større enn middelverdien (høyreside)
+  left_side <- vec[vec < mid]   # Verdier mindre enn middelverdien (venstreside)
+  
+  # Inverter venstresiden (gjør negative verdier positive)
+  left_side_inverted <- abs(left_side)  # Reflekterer de negative verdiene
+  
+  # Beregn Gini-koeffisient for høyre- og venstresiden
+  Gini_right <- ineq(right_side, type = "Gini")   # Gini for høyresiden
+  Gini_left <- ineq(left_side_inverted, type = "Gini")     # Gini for venstresiden (invertert)
+  
+  # Simulert normalfordelt vektor med samme størrelse, middelverdi og standardavvik
+  normal_vec <- rnorm(length(vec), mean = mean(vec), sd = sd(vec))
+  
+  # Del normalfordelingen i høyre- og venstreside og beregn Gini
+  right_side_norm <- normal_vec[normal_vec > mid]
+  left_side_norm <- normal_vec[normal_vec < mid]
+  
+  # Inverter venstresiden for normalfordelingen (gjør negative verdier positive)
+  left_side_norm_inverted <- abs(left_side_norm)
+  
+  # Beregn Gini for de inverterte venstresidene
+  Gini_right_norm <- ineq(right_side_norm, type = "Gini")
+  Gini_left_norm <- ineq(left_side_norm_inverted, type = "Gini")
+  
+  return(data.frame(
+    Gini_right = Gini_right, Gini_left = Gini_left,
+    Gini_right_norm = Gini_right_norm, Gini_left_norm = Gini_left_norm
+  ))
+}
+```
+
+### Beregning av optimal klassebredde (Freedman-Diaconis): `freedman_diaconis`
+
+```{r, Freedman-Diaconis}
+freedman_diaconis <- function(data) {
+  iqr_value <- IQR(data, na.rm = TRUE)  # Beregner interkvartilavstand
+  n <- length(na.omit(data))  # Antall ikke-manglende observasjoner
+  (2 * iqr_value) / (n^(1/3))  # Freedman-Diaconis formel
+}
+```

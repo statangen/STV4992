@@ -1,0 +1,462 @@
+---
+title: "Dokumentasjon: Oppsummerende deskriptiv statistikk"
+author: "T. Tangen"
+date: "2025-04-09"
+output: pdf_document
+warning: false
+messages: false
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(haven)
+library(ggplot2)
+library(tinytable)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(zoo)
+library(PxWebApiData)
+library(jsonlite)
+library(httr)
+library(sf)
+library(MASS)
+library(sandwich)
+library(stargazer)
+library(moments)
+library(DescTools)
+library(e1071)
+library(lmom)
+library(ineq)
+library(scales)
+library(entropy)
+library(tidyr)
+options(scipen=999)
+```
+
+# 1 Fordeling av oppmerksomhet
+
+I del 1 vil jeg se på fordelingen av oppmerksom over ulike policytemaer og over tid.
+
+## 1.1 Fordeling av oppmerksomhet i hele perioden
+
+```{r, h2_unorcap}
+h1a_u_main_count <- h1a_u %>%
+  count(hovedkat_t, name = "Antall")
+h1a_u_main_count <- h1a_u_main_count %>%
+  mutate("Andel" = (Antall / sum(Antall))* 100) %>%
+  arrange(Antall)
+h1a_u_main_count$hovedkat_t <- factor(h1a_u_main_count$hovedkat_t,
+                                levels = h1a_u_main_count$hovedkat_t)
+
+ggplot(h1a_u_main_count, aes(x = hovedkat_t, y = Antall)) +
+  geom_col(fill = "blue", alpha = 0.7) +
+  coord_flip() +
+  labs(title = "Utgifter",
+       x = "Hovedkategori",
+       y = "Antall og andel observasjoner") +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_y_continuous(breaks =  seq(0, 3500, 500), limits = c(0, 3500)) +
+  geom_text(aes(label = paste(round(Andel,1), "%")),
+            position = position_nudge(y = 200, x = 0.02),
+            size = 3,
+            color = "black")
+```
+
+### 
+
+### 
+
+### 1.2.1 Relativ agendastørrelse
+
+```{r, h1a_u_main}
+h1a_u_main <- h1a_u %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+differanser <- h1a_u_main %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(differanse = (andel_bb_kpi - andel_gb_kpi)*100, 
+            .groups = 'drop')
+
+katlist <- h1a_u_main %>%
+  reframe(hovedkat = unique(hovedkat),
+            hovedkat_t = unique(hovedkat_t))
+
+h1a_u_main$hovedkat_t <- factor(h1a_u_main$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Vi plotter den relative agendastørrelsen for hvert policyområde for Gul bok:
+
+```{r, h1a_u_main_gb_plot}
+ggplot(h1a_u_main, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+Vi gjør det samme for Blå bok:
+
+```{r, h1a_u_main_bb_plot}
+ggplot(h1a_u_main, aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+### 1.2.2 Relativ agendastørrelse, justert for Statens pensjonsfond utland og statsgjeld
+
+Dersom vi fjerner Statens pensjonsfond, får vi en hakkete utvikling i alle policyområder, som i stor grad er preget av at staten betaler avdrag på statsgjeld annethvert år.
+
+```{r, h1a_u_uten_spu}
+h1a_u_uten_spu <- h1a_u %>% filter(!kap == 2800) # Overføringer til SPU
+h1a_u_uten_spu <- h1a_u_uten_spu %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+katlist <- h1a_u_uten_spu %>%
+  summarise(hovedkat = unique(hovedkat),
+            hovedkat_t = unique(hovedkat_t))
+
+h1a_u_uten_spu$hovedkat_t <- factor(h1a_u_uten_spu$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+ggplot(h1a_u_uten_spu, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+På grunnlag av dette ønsker vi derfor også å korrigere for både statsgjeld og SPU:
+
+```{r, h1a_u_main_korrigert}
+h1a_u_korrigert <- h1a_u %>% filter(!kap == 1650) %>% filter(!kap == 1651) # Statsgjeldsavdrag
+h1a_u_korrigert <- h1a_u_korrigert %>% filter(!kap == 2800) # Overføringer til SPU
+h1a_u_main_korrigert <- h1a_u_korrigert %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+katlist <- h1a_u_main_korrigert %>%
+  reframe(hovedkat = unique(hovedkat),
+            hovedkat_t = unique(hovedkat_t))
+
+h1a_u_main_korrigert$hovedkat_t <- factor(h1a_u_main_korrigert$hovedkat_t, 
+                             levels = katlist$hovedkat_t)
+```
+
+Plotter vi dette inn, får vi en bedre representasjon av utviklingen i ulike policykategorier over tid, justert for SPU og statsgjeld.
+
+```{r, h1a_u_main_gb_plot_korrigert}
+ggplot(h1a_u_main_korrigert, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+```{r, h1a_u_main_bb_plot_korrigert}
+ggplot(h1a_u_main_korrigert, aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+### Relativ agendastørrelse
+
+```{r, h1a_i_main}
+h1a_i_main <- h1a_i %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+differanser <- h1a_i_main %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(differanse = (andel_bb_kpi - andel_gb_kpi)*100, 
+            .groups = 'drop')
+
+katlist <- h1a_i_main %>%
+  summarise(hovedkat = unique(hovedkat),
+            hovedkat_t = unique(hovedkat_t))
+
+h1a_i_main$hovedkat_t <- factor(h1a_i_main$hovedkat_t, 
+                               levels = katlist$hovedkat_t)
+```
+
+Vi plotter den relative agendastørrelsen for hvert policyområde for Gul bok:
+
+```{r, h1a_i_main_gb_plot}
+ggplot(h1a_i_main, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+scale_y_continuous(labels = percent_format(accuracy = 1)) +
+labs(
+  x = "År",
+  y = "Andel av statsbudsjettet",
+  fill = "Policykategorier"
+) +
+theme_minimal() +
+theme(
+  legend.text = element_text(size = 8),
+  legend.key.size = unit(0.4, "cm"),
+  legend.position = "right",
+  panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  panel.grid.minor = element_blank(),
+  axis.text.y = element_text(size = 8), 
+  axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+) +
+guides(fill = guide_legend(ncol = 1)) +
+scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+Vi gjør det samme for Blå bok:
+
+```{r, h1a_i_main_bb_plot}
+ggplot(h1a_i_main, aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+scale_y_continuous(labels = percent_format(accuracy = 1)) +
+labs(
+  x = "År",
+  y = "Andel av statsbudsjettet",
+  fill = "Policykategorier"
+) +
+theme_minimal() +
+theme(
+  legend.text = element_text(size = 8),
+  legend.key.size = unit(0.4, "cm"),
+  legend.position = "right",
+  panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+  panel.grid.minor = element_blank(),
+  axis.text.y = element_text(size = 8), 
+  axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+) +
+guides(fill = guide_legend(ncol = 1)) +
+scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+### Relativ agendastørrelse, justert for Statens pensjonsfond utland, statsgjeld og skatt
+
+Tilsvarende som ovenfor vil vi justere for statsgjeld og SPU:
+
+```{r, h1a_i_uten_spu}
+h1a_i_uten_spu <- h1a_i %>% filter(!kap == 5800) # Overføringer fra SPU
+h1a_i_uten_spu <- h1a_i_uten_spu %>% filter(!kap == 5999) # Statsgjeldsavdrag
+h1a_i_uten_spu <- h1a_i_uten_spu %>%
+  group_by(år, hovedkat, hovedkat_t) %>%
+  summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+            sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  group_by(år) %>%
+  mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+         andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+  ungroup()
+
+katlist <- h1a_i_uten_spu %>%
+  summarise(hovedkat = unique(hovedkat),
+            hovedkat_t = unique(hovedkat_t))
+
+h1a_i_uten_spu$hovedkat_t <- factor(h1a_i_uten_spu$hovedkat_t, 
+                                   levels = katlist$hovedkat_t)
+ggplot(h1a_i_uten_spu, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+Forskjellene er minimale. Dersom vi korrigerer for skatt, fjerner vi hele makroøkonomi-policytemaet:
+
+```{r, h1a_i_main_korrigert}
+h1a_i_main_korrigert <- h1a_i %>% filter(!kap == 5999) # Statsgjeldsavdrag
+h1a_i_main_korrigert <- h1a_i_main_korrigert %>% filter(!kap == 5800) # Overføringer til SPU
+h1a_i_main_korrigert <- h1a_i_main_korrigert %>% filter(!serie_t == "Skatter og avgifter") # Skatt
+h1a_i_main_korrigert <- h1a_i_main_korrigert %>%
+group_by(år, hovedkat, hovedkat_t) %>%
+summarise(sum_gb_kpi = sum(gb_kpi, na.rm = TRUE),
+          sum_bb_kpi = sum(bb_kpi, na.rm = TRUE), 
+          .groups = 'drop') %>%
+group_by(år) %>%
+mutate(andel_gb_kpi = sum_gb_kpi / sum(sum_gb_kpi),
+       andel_bb_kpi = sum_bb_kpi / sum(sum_bb_kpi)) %>%
+ungroup()
+
+katlist <- h1a_i_main_korrigert %>%
+summarise(hovedkat = unique(hovedkat),
+          hovedkat_t = unique(hovedkat_t))
+
+h1a_i_main_korrigert$hovedkat_t <- factor(h1a_i_main_korrigert$hovedkat_t, 
+                                       levels = katlist$hovedkat_t)
+```
+
+Plotter vi dette inn, får vi en bedre representasjon av utviklingen i ulike policykategorier over tid, justert for SPU og statsgjeld.
+
+```{r, h1a_i_main_korrigert_plot}
+ggplot(h1a_i_main_korrigert, aes(x = år, y = andel_gb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
+
+```{r, h1a_i_main_bb_plot_korrigert}
+ggplot(h1a_i_main_korrigert, aes(x = år, y = andel_bb_kpi, fill = hovedkat_t)) +
+  geom_area(color = "black", size = 0.5, position = "stack", alpha = 0.7) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = "År",
+    y = "Andel av statsbudsjettet",
+    fill = "Policykategorier"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.position = "right",
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8), 
+    axis.text.x = element_text(size = 8, angle = 90, hjust = 1)
+  ) +
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_x_continuous(breaks = seq(1999,2023, 1))
+```
